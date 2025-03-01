@@ -66,8 +66,8 @@ def main():
 
             # Process data and generate output for each GPU
         for index, row in df.iterrows():
-                if index < args.start_index:
-                    continue
+            if index < args.start_index:
+                continue
             question = row['question']
             question = f"""<|begin_of_text|>
 <|system|>

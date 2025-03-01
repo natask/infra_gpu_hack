@@ -20,9 +20,10 @@ def process_on_gpu(gpu_id, args, start_index, end_index=None):
     device = f'cuda:{gpu_id}' if torch.cuda.is_available() else 'cpu'
     
     # Load model and tokenizer
-    model_name = "meta-llama/Llama-2-70b-hf"
-    model = LlamaForCausalLM.from_pretrained(model_name, torch_dtype=torch.float16, device_map=device)
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    model = LlamaForCausalLM.from_pretrained(args.model_name).to(device)
+    tokenizer = AutoTokenizer.from_pretrained(args.model_name)
+    model.eval()
+    print(f"GPU {gpu_id} - CUDA is available: {torch.cuda.is_available()}")
     
     # Set generation parameters
     num_beams = 4
@@ -32,7 +33,7 @@ def process_on_gpu(gpu_id, args, start_index, end_index=None):
     # Prepare output files
     messages_output_path = f'{args.name}__messages_output{gpu_id}.csv'
     time_output_path = f'{args.name}__time_output{gpu_id}.csv'
-    
+
     # Create files with headers
     with open(messages_output_path, 'w', newline='') as f:
         writer = csv.writer(f)
@@ -107,12 +108,14 @@ def main():
     
     base_dir = os.path.dirname(os.path.abspath(__file__))
     
-    parser = argparse.ArgumentParser(description='Generate fine-tune dataset')
-    parser.add_argument("--dataset_name", type=str, default="datasets/GAIR/LIMO/limo_train.parquet", help="Path to the dataset file")
-    parser.add_argument("--batch_size", type=int, default=8, help="Batch size for inference")
-    parser.add_argument("--name", type=str, default="llama70b", help="Model string name")
-    parser.add_argument("--max_length", type=int, default=2080, help="Max generation length")
-    parser.add_argument("--start_index", type=int, default=0, help="Starting index for processing prompts")
+    with sdpa_kernel(SDPBackend.FLASH_ATTENTION):
+        parser = argparse.ArgumentParser(description="Generate model outputs using multiple GPUs")
+        parser.add_argument("--model_name", type=str, default="casperhansen/Llama-3.3-70B-instruct-awq", help="Hugging Face model name or path")
+        parser.add_argument("--dataset_name", type=str, default='final_dataset.parquet', help="Name of the dataset file (without path) in parquet")
+        parser.add_argument("--batch_size", type=int, default=8, help="Batch size for inference")
+        parser.add_argument("--name", type=str, default="llama70b", help="Model string name")
+        parser.add_argument("--max_length", type=int, default=2080, help="Max generation length")
+        parser.add_argument("--start_index", type=int, default=0, help="Starting index for processing prompts")
     args = parser.parse_args()
     
     # Determine the number of available GPUs
