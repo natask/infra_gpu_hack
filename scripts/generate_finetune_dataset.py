@@ -39,9 +39,6 @@ def main():
         model.eval()
         print(f"cuda is avaliable: {torch.cuda.is_available()}")
 
-        # Prepare the results DataFrame
-        results = []
-
         # params for generate
         num_beams = 4
         no_repeat_ngram_size = 3
@@ -49,18 +46,20 @@ def main():
 
         # Prepare the output files
         gpu_id = 0
-        messages_output_path = os.path.join('../', f'{args.name}__messages_output{gpu_id}.json')
-        time_output_path = os.path.join('../', f'{args.name}__time_output{gpu_id}.json')
+        messages_output_path = f'{args.name}__messages_output{gpu_id}.json'
+        time_output_path = f'{args.name}__time_output{gpu_id}.json'
 
         # Ensure the files exist by opening them in write mode initially
         open(messages_output_path, 'w').close()
         open(time_output_path, 'w').close()
+
         # Open the files in append mode
         messages_file = open(messages_output_path, 'a')
         time_file = open(time_output_path, 'a')
 
         # Load dataset
         df = pd.read_parquet(os.path.join(base_dir, "../", args.dataset_name))
+        total_start_time = time.time()
         for index, row in df.iterrows():
             question = row['question']
             question = f"""<|begin_of_text|>
@@ -77,14 +76,11 @@ You are a helpful assistant.
             # Generate the solution
             start_time = time.time()
             with torch.no_grad():
-                outputs = model.generate(**inputs, max_length=args.max_length, num_beams=num_beams, no_repeat_ngram_size=no_repeat_ngram_size, early_stopping=early_stopping)
+                outputs = model.generate(inputs.input_ids, max_length=args.max_length, num_beams=num_beams, no_repeat_ngram_size=no_repeat_ngram_size, early_stopping=early_stopping)
             generation_time = time.time() - start_time
             
             # Decode the generated solution
-            solution = tokenizer.decode(outputs[0], skip_special_tokens=True)
-            
-            # Append to results
-            results.append({'user': question, 'assistant': solution, 'generation_time': generation_time})
+            solution = tokenizer.decode(outputs, skip_special_tokens=True, clean_up_tokenization_spaces=False)
 
             # Append to messages format and save
             message_entry = [
@@ -107,17 +103,12 @@ You are a helpful assistant.
         messages_file.close()
         time_file.close()
 
-        # Create a DataFrame for results
-        results_df = pd.DataFrame(results)
 
         # Log the average generation time
-        avg_generation_time = sum(result['generation_time'] for result in results) / len(results)
+        total_generation_time = time.time() - total_start_time
+        avg_generation_time = total_generation_time / len(df.index)
         print(f"Average generation time per question: {avg_generation_time:.2f} seconds")
 
-        # Write outputs to file
-        results_df.to_json(f'{args.model_name}__finetune_dataset.json', orient='records', lines=True)
-
-        print("Results saved to finetune_dataset.json")
 
 
 if __name__ == '__main__':
