@@ -28,6 +28,7 @@ def main():
         parser.add_argument("--batch_size", type=int, default=8, help="Batch size for inference")
         parser.add_argument("--name", type=str, default="llama70b", help="Model string name")
         parser.add_argument("--max_length", type=int, default=2080, help="Max generation length")
+        parser.add_argument("--start_index", type=int, default=0, help="Starting index for processing prompts")
         args = parser.parse_args()
 
         # Prepare the results DataFrame
@@ -57,7 +58,11 @@ def main():
         # Load dataset
         df = pd.read_parquet(os.path.join(base_dir, "../", args.dataset_name))
         total_start_time = time.time()
+
+            # Process data and generate output for each GPU
         for index, row in df.iterrows():
+                if index < args.start_index:
+                    continue
             question = row['question']
             question = f"""<|begin_of_text|>
 <|system|>
@@ -86,7 +91,6 @@ You are a helpful assistant.
                     {"role": "user", "content": question},
                     {"role": "assistant", "content": solution}
                 ]
-                print(message_entry)
                 json.dump(message_entry, messages_file, indent=4)
                 messages_file.write("\n")
 
@@ -98,6 +102,9 @@ You are a helpful assistant.
                 time_entry = {'question': question, 'generation_time': generation_time, 'tokens_per_second': tokens_per_second}
                 json.dump(time_entry, time_file, indent=4)
                 time_file.write("\n")
+                
+                # Print the current index for easy resuming
+                print(f"Processed index {index}. To resume from next entry, use --start_index {index+1}")
 
         # Log the average generation time
         total_generation_time = time.time() - total_start_time

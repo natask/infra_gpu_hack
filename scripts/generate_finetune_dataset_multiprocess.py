@@ -86,6 +86,9 @@ You are a helpful assistant.
             time_entry = {'question': question, 'generation_time': generation_time, 'tokens_per_second': tokens_per_second}
             json.dump(time_entry, time_file, indent=4)
             time_file.write("\n")
+            
+            # Print the current index for easy resuming
+            print(f"GPU {gpu_id} - Processed index {index}. To resume from this GPU's subset, use --start_index {index+1}")
     
     total_generation_time = time.time() - total_start_time
     print(f"GPU {gpu_id} - Total generation time: {total_generation_time}")
