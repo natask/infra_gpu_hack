@@ -18,7 +18,7 @@ def main():
     # True
     print(torch.backends.cuda.math_sdp_enabled())
     # True
-    with torch.backends.cuda.sdp_kernel(
+    with torch.nn.attention.sdpa_kernel(
         enable_flash=True, enable_math=False, enable_mem_efficient=False
     ):
         parser = argparse.ArgumentParser(description="Generate model outputs")
