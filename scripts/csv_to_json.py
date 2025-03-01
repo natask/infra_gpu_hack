@@ -33,55 +33,31 @@ def csv_to_json(csv_file_path, json_file_path=None, format_type=None):
             
             # For messages format, we need special handling
             if format_type == 'messages':
-                # Group by pairs (user and assistant messages)
+                # Process rows for the new format
                 rows = list(csv_reader)
                 result = []
                 
-                # Process rows in pairs (user, assistant)
-                i = 0
-                while i < len(rows) - 1:
-                    if rows[i][0] == 'user' and rows[i+1][0] == 'assistant':
-                        # Parse token info if available
-                        token_info = None
-                        if len(rows[i+1]) > 2 and rows[i+1][2]:
+                for row in rows:
+                    if len(row) >= 3:  # Ensure we have all required columns
+                        prompt = row[0]
+                        response = row[1]
+                        
+                        # Parse logits data
+                        logits_data = []
+                        if row[2]:
                             try:
-                                token_info = json.loads(rows[i+1][2])
+                                logits_data = json.loads(row[2])
                             except json.JSONDecodeError:
-                                print(f"Warning: Could not parse token info for row {i+1}")
+                                print(f"Warning: Could not parse logits data for row")
                         
-                        # Create user message
-                        user_message = {"role": rows[i][0], "content": rows[i][1]}
-                        if len(rows[i]) > 2 and rows[i][2]:
-                            user_message["info"] = rows[i][2]
+                        # Create entry in the desired format
+                        entry = {
+                            "prompt": prompt,
+                            "response": response,
+                            "logits": logits_data
+                        }
                         
-                        # Create assistant message
-                        assistant_message = {"role": rows[i+1][0], "content": rows[i+1][1]}
-                        if token_info is not None:
-                            assistant_message["info"] = token_info
-                        
-                        message_pair = [user_message, assistant_message]
-                        result.append(message_pair)
-                        i += 2
-                    else:
-                        # Handle unpaired messages
-                        message = {"role": rows[i][0], "content": rows[i][1]}
-                        if len(rows[i]) > 2 and rows[i][2]:
-                            try:
-                                message["info"] = json.loads(rows[i][2]) if rows[i][2] else ""
-                            except json.JSONDecodeError:
-                                message["info"] = rows[i][2]
-                        result.append([message])
-                        i += 1
-                
-                # Handle any remaining row
-                if i < len(rows):
-                    message = {"role": rows[i][0], "content": rows[i][1]}
-                    if len(rows[i]) > 2 and rows[i][2]:
-                        try:
-                            message["info"] = json.loads(rows[i][2]) if rows[i][2] else ""
-                        except json.JSONDecodeError:
-                            message["info"] = rows[i][2]
-                    result.append([message])
+                        result.append(entry)
                 
             elif format_type == 'time':
                 # For time data, create a list of dictionaries

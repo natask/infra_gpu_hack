@@ -55,7 +55,7 @@ def main():
         # Create files with headers
         with open(messages_output_path, 'w', newline='') as f:
             writer = csv.writer(f)
-            writer.writerow(['role', 'content', 'info'])
+            writer.writerow(['prompt', 'response', 'logits_data'])
         
         with open(time_output_path, 'w', newline='') as f:
             writer = csv.writer(f)
@@ -88,7 +88,7 @@ You are a helpful assistant.
             input_ids = inputs.input_ids
             attention_mask = torch.ones_like(input_ids)
             generated_tokens = []
-            token_info = []
+            logits_data = []
             top_k = 5  # Number of top tokens to save
             
             with torch.no_grad():
@@ -96,7 +96,7 @@ You are a helpful assistant.
                 current_ids = input_ids.clone()
                 
                 # Generate until max length or end token
-                for _ in range(args.max_length - input_ids.size(1)):
+                for position in range(args.max_length - input_ids.size(1)):
                     # Get model outputs
                     outputs = model(input_ids=current_ids, attention_mask=attention_mask)
                     next_token_logits = outputs.logits[:, -1, :]
@@ -104,13 +104,35 @@ You are a helpful assistant.
                     # Get top-k tokens and their logits
                     topk_logits, topk_indices = torch.topk(next_token_logits, top_k, dim=-1)
                     
+                    # Select the next token (top-1 for greedy decoding)
+                    next_token = topk_indices[0, 0].unsqueeze(0).unsqueeze(0)
+                    chosen_token_id = next_token.item()
+                    chosen_token = tokenizer.decode([chosen_token_id])
+                    
                     # Convert to lists for storage
-                    topk_tokens = [tokenizer.decode([idx.item()]) for idx in topk_indices[0]]
-                    topk_ids = topk_indices[0].tolist()
-                    topk_logit_values = topk_logits[0].tolist()
+                    top_5_data = []
+                    for i in range(top_k):
+                        token_id = topk_indices[0, i].item()
+                        token = tokenizer.decode([token_id])
+                        logit = topk_logits[0, i].item()
+                        top_5_data.append({
+                            "token": token,
+                            "token_id": token_id,
+                            "logit": logit
+                        })
+                    
+                    # Get full logits (convert to Python list)
+                    full_logits = next_token_logits[0].detach().cpu().tolist()
                     
                     # Store the information for this position
-                    token_info.append([topk_tokens, [topk_ids], [topk_logit_values]])
+                    position_data = {
+                        "position": position,
+                        "chosen_token": chosen_token,
+                        "chosen_token_id": chosen_token_id,
+                        "top_5": top_5_data,
+                        "full_logits": full_logits
+                    }
+                    logits_data.append(position_data)
                     
                     # Select the next token (top-1 for greedy decoding)
                     next_token = topk_indices[0, 0].unsqueeze(0).unsqueeze(0)
@@ -135,12 +157,15 @@ You are a helpful assistant.
                 messages_writer = csv.writer(messages_file)
                 time_writer = csv.writer(time_file)
                 
-                # Write user message (with empty info field)
-                messages_writer.writerow(['user', question, ''])
+                # Format prompt with special tokens
+                formatted_prompt = f"<BOS><start_id>user<end_id>\n{question}<eot_id><start_id>assistant<end_id>\n"
                 
-                # Write assistant response with token info
-                token_info_json = json.dumps(token_info)
-                messages_writer.writerow(['assistant', solution, token_info_json])
+                # Format response with special tokens
+                formatted_response = f"{solution}<EOS>"
+                
+                # Write to CSV
+                logits_data_json = json.dumps(logits_data)
+                messages_writer.writerow([formatted_prompt, formatted_response, logits_data_json])
                 
                 print(f"Wrote user and assistant messages with token info to CSV")
 
