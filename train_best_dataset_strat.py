@@ -101,10 +101,16 @@ class LLaDADistiller:
             student_model_name,
             device_map=student_device,
             trust_remote_code=True, 
-            torch_dtype=torch.bfloat16,
-            # Enable gradient checkpointing for memory efficiency
-            use_gradient_checkpointing=True
+            torch_dtype=torch.bfloat16
         )
+        
+        # Enable gradient checkpointing after model is loaded
+        # This trades compute for memory by not storing all activations
+        print("Enabling gradient checkpointing for memory efficiency...")
+        if hasattr(self.student_model, 'gradient_checkpointing_enable'):
+            self.student_model.gradient_checkpointing_enable()
+        elif hasattr(self.student_model, 'enable_gradient_checkpointing'):
+            self.student_model.enable_gradient_checkpointing()
         
         # Freeze teacher model parameters
         for param in self.teacher_model.parameters():

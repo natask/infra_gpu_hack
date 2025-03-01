@@ -2,6 +2,24 @@
 
 This project is designed to handle and process datasets using various Python scripts. It combines datasets, evaluates models, and performs fine-tuning and speculative decoding.
 
+## Memory Optimization for LLaMA-LLaDA Distillation
+
+We've implemented two memory optimization strategies for the LLaMA-LLaDA distillation process to address memory constraints when working with large language models:
+
+1. **Simplified Strategy** (`train_simple_strat.py`): Focuses on the most essential memory optimizations:
+   - Gradient checkpointing for the student model
+   - No gradient computation for the teacher model
+   - Mixed precision training (bfloat16)
+   - Periodic CUDA cache clearing
+
+2. **Comprehensive Strategy** (`train_all_strat.py`): Implements all optimizations from the simplified strategy plus:
+   - Data pre-tokenization
+   - Gradient accumulation
+   - Advanced optimizer configuration
+   - Learning rate scheduling
+
+For detailed information on these optimizations, see [OPTIMIZATION.md](OPTIMIZATION.md).
+  
 ## Project Structure
 
 - **[combine_datasets.py](cci:7://file:///home/savnkk/infra_gpu_hack/combine_datasets.py:0:0-0:0)**: This script loads and combines datasets from different sources, ensuring all columns are present in each dataset. The final dataset is saved as a Parquet file.

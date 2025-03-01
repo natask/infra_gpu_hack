@@ -6,7 +6,7 @@ import json
 import gc
 import psutil
 from custom_dataset import get_dataloader
-from transformers import LlamaForCausalLM, AutoTokenizer, BitsAndBytesConfig
+from transformers import AutoModelForCausalLM, AutoTokenizer
 import torch
 import tqdm
 import pandas as pd
@@ -29,21 +29,16 @@ def process_on_gpu(gpu_id, args, num_gpus):
     
     # Configure model loading options for memory efficiency
     if args.use_4bit:
-        # Use 4-bit quantization for memory efficiency
-        bnb_config = BitsAndBytesConfig(
-            load_in_4bit=True,
-            bnb_4bit_quant_type="nf4",
-            bnb_4bit_compute_dtype=torch.float16,
-            bnb_4bit_use_double_quant=True
-        )
-        model = LlamaForCausalLM.from_pretrained(
-            args.model_name,
-            quantization_config=bnb_config,
-            device_map=device
-        )
+        # Since BitsAndBytesConfig is not available in this version of transformers,
+        # we'll use half precision instead
+        print(f"GPU {gpu_id} - 4-bit quantization not available in this transformers version, using half precision instead")
+        model = AutoModelForCausalLM.from_pretrained(
+            args.model_name, 
+            torch_dtype=torch.float16
+        ).to(device)
     else:
         # Use half precision (16-bit) for better performance
-        model = LlamaForCausalLM.from_pretrained(
+        model = AutoModelForCausalLM.from_pretrained(
             args.model_name, 
             torch_dtype=torch.float16
         ).to(device)
@@ -75,28 +70,22 @@ def process_on_gpu(gpu_id, args, num_gpus):
     base_dir = os.path.dirname(os.path.abspath(__file__))
     dataset_path = os.path.join(base_dir, "../", args.dataset_name)
     
-    # Get total number of rows without loading entire dataset
-    total_rows = pd.read_parquet(dataset_path, columns=[]).shape[0]
-    print(f"GPU {gpu_id} - Total rows in dataset: {total_rows}")
-    
-    # Process in chunks to avoid memory issues
-    chunk_size = args.chunk_size  # Process this many rows at once
-    
     total_start_time = time.time()
     
-    # Process entries using striding approach with chunking
-    for chunk_start in range(0, total_rows, chunk_size):
-        chunk_end = min(chunk_start + chunk_size, total_rows)
-        print(f"GPU {gpu_id} - Processing chunk {chunk_start}-{chunk_end}")
+    # Check if dataset is a directory (custom dataset) or a parquet file
+    if os.path.isdir(dataset_path):
+        print(f"GPU {gpu_id} - Processing directory dataset: {dataset_path}")
         
-        # Load only the current chunk
-        df_chunk = pd.read_parquet(dataset_path, engine='pyarrow')
-        # Filter to only the current chunk
-        df_chunk = df_chunk.iloc[chunk_start:chunk_end]
+        # Get all JSON files in the directory
+        json_files = [f for f in os.listdir(dataset_path) if f.endswith('.json')]
+        json_files.sort()  # Ensure consistent ordering
+        total_files = len(json_files)
+        print(f"GPU {gpu_id} - Found {total_files} JSON files in dataset directory")
         
-        # Process entries in this chunk
-        for index, row in df_chunk.iterrows():
-            # Only process entries where (index % num_gpus) == gpu_id
+        # Process each file based on GPU ID (striding approach)
+        processed_count = 0
+        for index, filename in enumerate(json_files):
+            # Only process files where (index % num_gpus) == gpu_id
             if index % num_gpus != gpu_id:
                 continue
                 
@@ -104,7 +93,70 @@ def process_on_gpu(gpu_id, args, num_gpus):
             if index < args.start_index:
                 continue
             
-            question = row['question']
+            # Load the JSON file
+            file_path = os.path.join(dataset_path, filename)
+            try:
+                with open(file_path, 'r') as f:
+                    entry = json.load(f)
+                
+                # Extract question from the entry
+                if 'question' in entry:
+                    question = entry['question']
+                    processed_count += 1
+                    print(f"GPU {gpu_id} - Processing file {index}/{total_files}: {filename}")
+                else:
+                    print(f"GPU {gpu_id} - Skipping file {filename}: 'question' not found")
+                    continue
+            except Exception as e:
+                print(f"GPU {gpu_id} - Error processing file {filename}: {str(e)}")
+                continue
+    else:
+        # Handle parquet file dataset
+        print(f"GPU {gpu_id} - Processing parquet dataset: {dataset_path}")
+        
+        try:
+            # Get total number of rows without loading entire dataset
+            total_rows = pd.read_parquet(dataset_path, columns=[]).shape[0]
+            print(f"GPU {gpu_id} - Total rows in dataset: {total_rows}")
+            
+            # Process in chunks to avoid memory issues
+            chunk_size = args.chunk_size  # Process this many rows at once
+            processed_count = 0
+            
+            # Process entries using striding approach with chunking
+            for chunk_start in range(0, total_rows, chunk_size):
+                chunk_end = min(chunk_start + chunk_size, total_rows)
+                print(f"GPU {gpu_id} - Processing chunk {chunk_start}-{chunk_end}")
+                
+                try:
+                    # Load only the current chunk
+                    df_chunk = pd.read_parquet(dataset_path, engine='pyarrow')
+                    # Filter to only the current chunk
+                    df_chunk = df_chunk.iloc[chunk_start:chunk_end]
+                    
+                    # Process entries in this chunk
+                    for index, row in df_chunk.iterrows():
+                        # Only process entries where (index % num_gpus) == gpu_id
+                        if index % num_gpus != gpu_id:
+                            continue
+                            
+                        # Skip entries before the start index
+                        if index < args.start_index:
+                            continue
+                        
+                        if 'question' in row:
+                            question = row['question']
+                            processed_count += 1
+                            print(f"GPU {gpu_id} - Processing row {index}/{total_rows}")
+                        else:
+                            print(f"GPU {gpu_id} - Skipping row {index}: 'question' not found")
+                            continue
+                except Exception as e:
+                    print(f"GPU {gpu_id} - Error processing chunk {chunk_start}-{chunk_end}: {str(e)}")
+                    continue
+        except Exception as e:
+            print(f"GPU {gpu_id} - Error reading parquet file: {str(e)}")
+            return
             question = f"""<|begin_of_text|>
 <|system|>
 You are a helpful assistant.
@@ -224,8 +276,7 @@ You are a helpful assistant.
                 print(f"GPU {gpu_id} - Memory usage after index {index}: {current_mem:.2f} MB")
                 print(f"GPU {gpu_id} - GPU memory allocated: {torch.cuda.memory_allocated(device) / 1024 / 1024:.2f} MB")
     
-        # Clear dataframe chunk to free memory
-        del df_chunk
+        # Free memory periodically
         gc.collect()
         torch.cuda.empty_cache()
     
@@ -249,13 +300,14 @@ def main():
     with sdpa_kernel(SDPBackend.FLASH_ATTENTION):
         parser = argparse.ArgumentParser(description="Generate model outputs using multiple GPUs")
         parser.add_argument("--model_name", type=str, default="casperhansen/Llama-3.3-70B-instruct-awq", help="Hugging Face model name or path")
-        parser.add_argument("--dataset_name", type=str, default='final_dataset.parquet', help="Name of the dataset file (without path) in parquet")
+        parser.add_argument("--dataset_name", type=str, default='final_dataset.parquet', help="Name of the dataset file (without path) or directory containing JSON files")
         parser.add_argument("--batch_size", type=int, default=8, help="Batch size for inference")
         parser.add_argument("--name", type=str, default="llama70b", help="Model string name")
         parser.add_argument("--max_length", type=int, default=2080, help="Max generation length")
         parser.add_argument("--start_index", type=int, default=0, help="Starting index for processing prompts")
         parser.add_argument("--chunk_size", type=int, default=1000, help="Number of rows to process in each chunk")
         parser.add_argument("--use_4bit", action="store_true", help="Use 4-bit quantization for memory efficiency")
+        parser.add_argument("--debug", action="store_true", help="Enable debug mode with additional logging")
     args = parser.parse_args()
     
     # Determine the number of available GPUs
