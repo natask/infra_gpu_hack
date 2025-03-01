@@ -46,8 +46,16 @@ def main():
         no_repeat_ngram_size = 3
         early_stopping = True
 
+        # Prepare the output files
+        messages_output_path = f'{args.model_name}__messages_output.json'
+        time_output_path = f'{args.model_name}__time_output.json'
+
+        # Open the files in append mode
+        messages_file = open(messages_output_path, 'a')
+        time_file = open(time_output_path, 'a')
+
         # Load dataset
-        df = pd.read_parquet(os.path.join(base_dir, "datasets", args.dataset_name))
+        df = pd.read_parquet(os.path.join(base_dir, "../", args.dataset_name))
         for index, row in df.iterrows():
             question = row['question']
             question = f"""<|begin_of_text|>
@@ -72,6 +80,27 @@ You are a helpful assistant.
             
             # Append to results
             results.append({'user': question, 'assistant': solution, 'generation_time': generation_time})
+
+            # Append to messages format and save
+            message_entry = [
+                {"role": "user", "content": question},
+                {"role": "assistant", "content": solution}
+            ]
+            json.dump(message_entry, messages_file, indent=4)
+            messages_file.write("\n")
+
+            # Calculate tokens per second
+            num_tokens = inputs.input_ids.numel()
+            tokens_per_second = num_tokens / generation_time
+
+            # Record and save time elapsed
+            time_entry = {'question': question, 'generation_time': generation_time, 'tokens_per_second': tokens_per_second}
+            json.dump(time_entry, time_file, indent=4)
+            time_file.write("\n")
+
+        # Close the files
+        messages_file.close()
+        time_file.close()
 
         # Create a DataFrame for results
         results_df = pd.DataFrame(results)
