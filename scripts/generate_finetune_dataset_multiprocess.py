@@ -15,7 +15,7 @@ import multiprocessing
 # Only enable flash attention backend
 os.environ['HF_HOME'] = '/mount/model-cache'
 
-def process_on_gpu(gpu_id, args, start_index, end_index=None):
+def process_on_gpu(gpu_id, args, num_gpus):
     """Process a subset of the dataset on a specific GPU."""
     # Set the device
     device = f'cuda:{gpu_id}' if torch.cuda.is_available() else 'cpu'
@@ -48,16 +48,19 @@ def process_on_gpu(gpu_id, args, start_index, end_index=None):
     base_dir = os.path.dirname(os.path.abspath(__file__))
     df = pd.read_parquet(os.path.join(base_dir, "../", args.dataset_name))
     
-    # Limit to the assigned subset
-    if end_index is not None:
-        df = df.iloc[start_index:end_index]
-    else:
-        df = df.iloc[start_index:]
-    
     total_start_time = time.time()
     
-    # Process each entry
+    # Process entries using striding approach
+    # Each GPU processes every num_gpus-th entry starting from its gpu_id
     for index, row in df.iterrows():
+        # Only process entries where (index % num_gpus) == gpu_id
+        if index % num_gpus != gpu_id:
+            continue
+            
+        # Skip entries before the start index
+        if index < args.start_index:
+            continue
+            
         question = row['question']
         question = f"""<|begin_of_text|>
 <|system|>
@@ -165,34 +168,20 @@ def main():
     num_gpus = torch.cuda.device_count()
     print(f"Number of available GPUs: {num_gpus}")
     
-    # Load dataset to get total size
-    df = pd.read_parquet(os.path.join(base_dir, "../", args.dataset_name))
-    total_entries = len(df)
-    
-    # Calculate entries per GPU
-    entries_per_gpu = total_entries // num_gpus
-    remainder = total_entries % num_gpus
-    
-    # Create processes for each GPU
-    processes = []
-    start_idx = args.start_index
-    
-    for gpu_id in range(num_gpus):
-        # Calculate the range for this GPU
-        end_idx = start_idx + entries_per_gpu
-        if gpu_id < remainder:
-            end_idx += 1
-        
-        # Create and start the process
-        p = multiprocessing.Process(
-            target=process_on_gpu,
-            args=(gpu_id, args, start_idx, end_idx)
-        )
-        processes.append(p)
-        p.start()
-        
-        # Update start index for next GPU
-        start_idx = end_idx
+    if num_gpus == 0:
+        print("No GPUs available. Running on CPU.")
+        process_on_gpu(0, args, 1)  # Single process mode
+    else:
+        # Create processes for each GPU using striding approach
+        processes = []
+        for gpu_id in range(num_gpus):
+            # Each GPU processes every num_gpus-th entry starting from its gpu_id
+            p = multiprocessing.Process(
+                target=process_on_gpu,
+                args=(gpu_id, args, num_gpus)
+            )
+            processes.append(p)
+            p.start()
     
     # Wait for all processes to complete
     for p in processes:
