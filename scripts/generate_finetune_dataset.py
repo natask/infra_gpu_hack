@@ -8,6 +8,7 @@ import torch
 import tqdm
 import pandas as pd
 import torch
+import time
 os.environ['HF_HOME'] = '/mount/model-cache'
 
 def main():
@@ -31,7 +32,7 @@ def main():
         results = []
         # Load model and tokenizer
         
-        
+        # base_dir = os.path.dirname(os.path.abspath(__file__))
         model = LlamaForCausalLM.from_pretrained(args.model_name).to('cuda')
         tokenizer = AutoTokenizer.from_pretrained(args.model_name)
         model.eval()
@@ -61,21 +62,26 @@ You are a helpful assistant.
             inputs = tokenizer(question, return_tensors='pt').to(model.device)
             
             # Generate the solution
+            start_time = time.time()
             with torch.no_grad():
-                outputs = model.generate(**inputs, max_length=max_length, num_beams=num_beams, no_repeat_ngram_size=no_repeat_ngram_size, early_stopping=early_stopping)  # Adjust max_length as needed , max_length=200
+                outputs = model.generate(**inputs, max_length=args.max_length, num_beams=num_beams, no_repeat_ngram_size=no_repeat_ngram_size, early_stopping=early_stopping)
+            generation_time = time.time() - start_time
             
             # Decode the generated solution
             solution = tokenizer.decode(outputs[0], skip_special_tokens=True)
             
             # Append to results
-            results.append({'user': question, 'assistant': solution})
+            results.append({'user': question, 'assistant': solution, 'generation_time': generation_time})
 
         # Create a DataFrame for results
         results_df = pd.DataFrame(results)
 
+        # Log the average generation time
+        avg_generation_time = sum(result['generation_time'] for result in results) / len(results)
+        print(f"Average generation time per question: {avg_generation_time:.2f} seconds")
 
         # Write outputs to file
-        results_df.to_json('finetune_dataset.json', orient='records', lines=True)
+        results_df.to_json(f'{args.model_name}__finetune_dataset.json', orient='records', lines=True)
 
         print("Results saved to finetune_dataset.json")
 
