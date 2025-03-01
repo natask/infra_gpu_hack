@@ -34,7 +34,7 @@ def main():
         # Load model and tokenizer
         
         base_dir = os.path.dirname(os.path.abspath(__file__))
-        model = LlamaForCausalLM.from_pretrained(args.model_name).to('cuda')
+        model = LlamaForCausalLM.from_pretrained(args.model_name).to('cuda' if torch.cuda.is_available() else 'cpu')
         tokenizer = AutoTokenizer.from_pretrained(args.model_name)
         model.eval()
         print(f"cuda is avaliable: {torch.cuda.is_available()}")
@@ -80,7 +80,7 @@ You are a helpful assistant.
             generation_time = time.time() - start_time
             
             # Decode the generated solution
-            solution = tokenizer.decode(outputs, skip_special_tokens=True, clean_up_tokenization_spaces=False)
+            solution = tokenizer.batch_decode(outputs, skip_special_tokens=True, clean_up_tokenization_spaces=False)
 
             # Append to messages format and save
             message_entry = [
