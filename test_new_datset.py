@@ -11,60 +11,55 @@ import argparse
 
 class PromptDataset(Dataset):
     def __init__(self, data_path, tokenizer_teacher, tokenizer_student, max_length=512):
-        # Load data more efficiently by specifying columns and using chunking
-        self.df = pd.read_parquet(data_path, columns=['question']).iloc[:1800]
+        if data_path and not data_path.startswith("GAIR/"):
+            # Legacy mode: load from parquet file
+            print(f"Loading data from parquet file: {data_path}")
+            self.df = pd.read_parquet(data_path, columns=['question'])
+            self._load_from_dataframe()
+        else:
+            # New mode: load from Hugging Face dataset
+            self._load_from_huggingface(dataset_name)
         self.tokenizer_teacher = tokenizer_teacher
         self.tokenizer_student = tokenizer_student
         self.max_length = max_length
         
-        # Pre-tokenize data to speed up training
-        print("Pre-tokenizing data to speed up training...")
-        self.tokenized_data = []
-        for idx in tqdm(range(len(self.df))):
-            prompt = self.df.iloc[idx]['question']
-            
-            # Tokenize for teacher (LLaMA)
-            teacher_inputs = self.tokenizer_teacher(
-                prompt,
-                return_tensors="pt",
-                padding="max_length",
-                max_length=self.max_length,
-                truncation=True
-            )
-            
-            # Tokenize for student (LLaDA)
-            m = [{"role": "user", "content": prompt}]
-            student_prompt = self.tokenizer_student.apply_chat_template(
-                m, 
-                add_generation_prompt=True, 
-                tokenize=False
-            )
-            student_inputs = self.tokenizer_student(
-                student_prompt,
-                return_tensors="pt",
-                padding="max_length",
-                max_length=self.max_length,
-                truncation=True
-            )
-            
-            self.tokenized_data.append({
-                'prompt': prompt,
-                'teacher_input_ids': teacher_inputs['input_ids'].squeeze(0),
-                'teacher_attention_mask': teacher_inputs['attention_mask'].squeeze(0),
-                'student_input_ids': student_inputs['input_ids'].squeeze(0),
-                'student_attention_mask': student_inputs['attention_mask'].squeeze(0),
-            })
-        
-        # Free memory
-        del self.df
-        import gc
-        gc.collect()
-        
     def __len__(self):
-        return len(self.tokenized_data)
+        return len(self.df)
     
     def __getitem__(self, idx):
-        return self.tokenized_data[idx]
+        prompt = self.df.iloc[idx]['question']
+        
+        # Tokenize for teacher (LLaMA)
+        teacher_inputs = self.tokenizer_teacher(
+            prompt,
+            return_tensors="pt",
+            padding="max_length",
+            max_length=self.max_length,
+            truncation=True
+        )
+        
+        # Tokenize for student (LLaDA)
+        m = [{"role": "user", "content": prompt}]
+        student_prompt = self.tokenizer_student.apply_chat_template(
+            m, 
+            add_generation_prompt=True, 
+            tokenize=False
+        )
+        student_inputs = self.tokenizer_student(
+            student_prompt,
+            return_tensors="pt",
+            padding="max_length",
+            max_length=self.max_length,
+            truncation=True
+        )
+        
+        return {
+            'prompt': prompt,
+            'teacher_input_ids': teacher_inputs['input_ids'].squeeze(0),
+            'teacher_attention_mask': teacher_inputs['attention_mask'].squeeze(0),
+            'student_input_ids': student_inputs['input_ids'].squeeze(0),
+            'student_attention_mask': student_inputs['attention_mask'].squeeze(0),
+        }
 
 class LLaDADistiller:
     def __init__(
@@ -103,13 +98,6 @@ class LLaDADistiller:
             trust_remote_code=True, 
             torch_dtype=torch.bfloat16
         )
-        
-        # Enable gradient checkpointing after model is loaded
-        # This trades compute for memory by not storing all activations
-        if hasattr(self.student_model, 'gradient_checkpointing_enable'):
-            self.student_model.gradient_checkpointing_enable()
-        elif hasattr(self.student_model, 'enable_gradient_checkpointing'):
-            self.student_model.enable_gradient_checkpointing()
         
         # Freeze teacher model parameters
         for param in self.teacher_model.parameters():
@@ -164,7 +152,7 @@ class LLaDADistiller:
         logits = self.student_model(input_ids.to(self.student_device)).logits
         return logits
     
-    def distill_batch(self, batch, optimizer, do_backward=False):
+    def distill_batch(self, batch, optimizer):
         """Perform distillation on a single batch"""
         teacher_input_ids = batch['teacher_input_ids'].to(self.teacher_device)
         teacher_attention_mask = batch['teacher_attention_mask'].to(self.teacher_device)
@@ -237,15 +225,12 @@ class LLaDADistiller:
         
         loss = loss / batch_size
         
-        # Backpropagation (only if requested)
-        if do_backward:
-            loss.backward()
-            return loss
-        else:
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-            return loss.item()
+        # Backpropagation
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+        
+        return loss.item()
     
     def train(
         self,
@@ -256,10 +241,7 @@ class LLaDADistiller:
         learning_rate=5e-5,
         max_length=512,
         save_steps=100,
-        eval_steps=50,
-        gradient_accumulation_steps=4,  # Accumulate gradients to save memory
-        warmup_steps=100,  # Warm up learning rate
-        weight_decay=0.01  # Weight decay for regularization
+        eval_steps=50
     ):
         os.makedirs(output_dir, exist_ok=True)
         
@@ -272,91 +254,37 @@ class LLaDADistiller:
         )
         dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
         
-        # Setup optimizer with memory-efficient settings
-        no_decay = ["bias", "LayerNorm.weight"]
-        optimizer_grouped_parameters = [
-            {
-                "params": [p for n, p in self.student_model.named_parameters() 
-                          if not any(nd in n for nd in no_decay)],
-                "weight_decay": weight_decay,
-            },
-            {
-                "params": [p for n, p in self.student_model.named_parameters() 
-                          if any(nd in n for nd in no_decay)],
-                "weight_decay": 0.0,
-            },
-        ]
-        optimizer = torch.optim.AdamW(
-            optimizer_grouped_parameters,
-            lr=learning_rate,
-            betas=(0.9, 0.999),
-            eps=1e-8
-        )
+        # Setup optimizer
+        optimizer = torch.optim.AdamW(self.student_model.parameters(), lr=learning_rate)
         
-        # Calculate total training steps for learning rate scheduler
-        dataset_size = len(dataset)
-        total_steps = (dataset_size // (batch_size * gradient_accumulation_steps)) * num_epochs
-        
-        # Create learning rate scheduler
-        from transformers import get_linear_schedule_with_warmup
-        scheduler = get_linear_schedule_with_warmup(
-            optimizer, 
-            num_warmup_steps=warmup_steps, 
-            num_training_steps=total_steps
-        )
-        
-        # Training loop with gradient accumulation
+        # Training loop
         global_step = 0
         total_loss = 0
-        actual_batch_size = batch_size * gradient_accumulation_steps
         
         for epoch in range(num_epochs):
             print(f"Epoch {epoch+1}/{num_epochs}")
-            self.student_model.train()
             
             progress_bar = tqdm(dataloader, desc=f"Epoch {epoch+1}")
-            optimizer.zero_grad()  # Zero gradients at the beginning of each epoch
-            
-            for step, batch in enumerate(progress_bar):
-                # Forward and backward pass
-                loss = self.distill_batch(batch, optimizer, do_backward=True)
-                loss = loss / gradient_accumulation_steps  # Normalize loss for gradient accumulation
-                total_loss += loss.item() * gradient_accumulation_steps  # Track unnormalized loss for reporting
+            for batch in progress_bar:
+                loss = self.distill_batch(batch, optimizer)
+                total_loss += loss
+                global_step += 1
                 
-                # Update weights only after accumulating gradients
-                if (step + 1) % gradient_accumulation_steps == 0 or step == len(dataloader) - 1:
-                    # Clip gradients to prevent exploding gradients
-                    torch.nn.utils.clip_grad_norm_(self.student_model.parameters(), max_norm=1.0)
-                    
-                    # Update parameters
-                    optimizer.step()
-                    scheduler.step()
-                    optimizer.zero_grad()
-                    global_step += 1
-                    
-                    # Update progress bar
-                    progress_bar.set_postfix({
-                        "loss": loss.item() * gradient_accumulation_steps,
-                        "lr": scheduler.get_last_lr()[0]
-                    })
-                    
-                    # Save checkpoint
-                    if global_step % save_steps == 0:
-                        checkpoint_dir = os.path.join(output_dir, f"checkpoint-{global_step}")
-                        os.makedirs(checkpoint_dir, exist_ok=True)
-                        self.student_model.save_pretrained(checkpoint_dir)
-                        self.student_tokenizer.save_pretrained(checkpoint_dir)
-                        print(f"Saved model checkpoint to {checkpoint_dir}")
-                    
-                    # Evaluate
-                    if global_step % eval_steps == 0:
-                        avg_loss = total_loss / (eval_steps * gradient_accumulation_steps)
-                        print(f"Step {global_step}: Average Loss = {avg_loss:.4f}")
-                        total_loss = 0
-                        
-                # Explicitly free memory
-                if hasattr(torch.cuda, 'empty_cache'):
-                    torch.cuda.empty_cache()
+                progress_bar.set_postfix({"loss": loss})
+                
+                # Save checkpoint
+                if global_step % save_steps == 0:
+                    checkpoint_dir = os.path.join(output_dir, f"checkpoint-{global_step}")
+                    os.makedirs(checkpoint_dir, exist_ok=True)
+                    self.student_model.save_pretrained(checkpoint_dir)
+                    self.student_tokenizer.save_pretrained(checkpoint_dir)
+                    print(f"Saved model checkpoint to {checkpoint_dir}")
+                
+                # Evaluate
+                if global_step % eval_steps == 0:
+                    avg_loss = total_loss / eval_steps
+                    print(f"Step {global_step}: Average Loss = {avg_loss:.4f}")
+                    total_loss = 0
         
         # Save final model
         final_output_dir = os.path.join(output_dir, "final_model")
@@ -463,22 +391,18 @@ def main():
                         help='Device for teacher model')
     parser.add_argument('--student_device', type=str, default="cuda:1",
                         help='Device for student model')
-    parser.add_argument('--data_path', type=str, default="./final_dataset.parquet",
+    parser.add_argument('--data_path', type=str, default=None,
                         help='Path to the dataset file')
+    parser.add_argument('--dataset_name', type=str, default="GAIR/lima",
+                    help='Hugging Face dataset name to use (e.g., "GAIR/lima")'),
     parser.add_argument('--output_dir', type=str, default="./llada_distilled",
                         help='Output directory for saved models')
     parser.add_argument('--batch_size', type=int, default=4,
                         help='Batch size for training')
-    parser.add_argument('--gradient_accumulation_steps', type=int, default=4,
-                        help='Number of steps to accumulate gradients')
     parser.add_argument('--num_epochs', type=int, default=3,
                         help='Number of training epochs')
     parser.add_argument('--learning_rate', type=float, default=5e-5,
                         help='Learning rate')
-    parser.add_argument('--weight_decay', type=float, default=0.01,
-                        help='Weight decay for AdamW optimizer')
-    parser.add_argument('--warmup_steps', type=int, default=100,
-                        help='Number of warmup steps for learning rate scheduler')
     parser.add_argument('--temperature', type=float, default=2.0,
                         help='Temperature for distillation')
     parser.add_argument('--max_length', type=int, default=512,
@@ -489,10 +413,6 @@ def main():
                         help='Evaluate every X steps')
     
     args = parser.parse_args()
-    
-    # Set up torch for memory efficiency
-    torch.backends.cuda.matmul.allow_tf32 = True  # Allow TF32 for faster computation
-    torch.backends.cudnn.benchmark = True  # Optimize CUDNN for faster training
     
     # Create distiller
     distiller = LLaDADistiller(
@@ -512,10 +432,7 @@ def main():
         learning_rate=args.learning_rate,
         max_length=args.max_length,
         save_steps=args.save_steps,
-        eval_steps=args.eval_steps,
-        gradient_accumulation_steps=args.gradient_accumulation_steps,
-        warmup_steps=args.warmup_steps,
-        weight_decay=args.weight_decay
+        eval_steps=args.eval_steps
     )
     
     # Evaluate

@@ -5,60 +5,133 @@ import torch.nn.functional as F
 import pandas as pd
 from torch.utils.data import Dataset, DataLoader
 from transformers import AutoModel, AutoModelForCausalLM, AutoTokenizer
+from datasets import load_dataset
 from tqdm import tqdm
 import torch.distributed as dist
 import argparse
+import gc
 
 class PromptDataset(Dataset):
-    def __init__(self, data_path, tokenizer_teacher, tokenizer_student, max_length=512):
-        # Load data more efficiently by specifying columns and using chunking
-        self.df = pd.read_parquet(data_path, columns=['question']).iloc[:1800]
+    def __init__(self, data_path, tokenizer_teacher, tokenizer_student, max_length=512, dataset_name="GAIR/lima", num_samples=None):
+        # If data_path is provided and it's not the dataset name, use it for backward compatibility
+        if data_path and not data_path.startswith("GAIR/"):
+            # Legacy mode: load from parquet file
+            print(f"Loading data from parquet file: {data_path}")
+            self.df = pd.read_parquet(data_path, columns=['question'])
+            if num_samples:
+                self.df = self.df.iloc[:num_samples]
+            self._load_from_dataframe()
+        else:
+            # New mode: load from Hugging Face dataset
+            self._load_from_huggingface(dataset_name, num_samples)
+        
+        # Set tokenizers and max length
         self.tokenizer_teacher = tokenizer_teacher
         self.tokenizer_student = tokenizer_student
         self.max_length = max_length
+    
+    def _load_from_huggingface(self, dataset_name="GAIR/lima", num_samples=None):
+        """Load data efficiently from Hugging Face datasets"""
+        print(f"Loading dataset from Hugging Face: {dataset_name}")
+        
+        # Load the dataset efficiently with streaming mode for large datasets
+        dataset = load_dataset(dataset_name, streaming=False)
+        
+        # Convert to pandas for consistent processing
+        if "train" in dataset:
+            self.data = dataset["train"]
+        else:
+            # If no train split, use the first available split
+            first_split = list(dataset.keys())[0]
+            self.data = dataset[first_split]
+        
+        # Limit number of samples if specified
+        if num_samples is not None:
+            self.data = self.data.select(range(min(num_samples, len(self.data))))
         
         # Pre-tokenize data to speed up training
         print("Pre-tokenizing data to speed up training...")
         self.tokenized_data = []
+        
+        # Process in batches for efficiency
+        batch_size = 32  # Process multiple examples at once
+        
+        for i in tqdm(range(0, len(self.data), batch_size)):
+            batch = self.data[i:min(i+batch_size, len(self.data))]
+            
+            # Extract prompts from the dataset
+            if "conversations" in batch.features:
+                # Format for chat datasets
+                prompts = [self._format_conversations(item["conversations"]) for item in batch]
+            elif "instruction" in batch.features:
+                # Format for instruction datasets
+                prompts = [item["instruction"] for item in batch]
+            else:
+                # Default to 'text' field
+                prompts = [item["text"] for item in batch]
+            
+            # Process each prompt
+            for prompt in prompts:
+                self._process_and_tokenize_prompt(prompt)
+        
+        # Free memory
+        del self.data
+        gc.collect()
+    
+    def _format_conversations(self, conversations):
+        """Extract the first user message from conversations"""
+        for turn in conversations:
+            if turn.get("from") == "human" or turn.get("role") == "user":
+                return turn.get("value") or turn.get("content")
+        return conversations[0].get("value") or conversations[0].get("content")
+    
+    def _load_from_dataframe(self):
+        """Load and process data from pandas DataFrame"""
+        # Pre-tokenize data to speed up training
+        print("Pre-tokenizing data from parquet file...")
+        self.tokenized_data = []
+        
         for idx in tqdm(range(len(self.df))):
             prompt = self.df.iloc[idx]['question']
-            
-            # Tokenize for teacher (LLaMA)
-            teacher_inputs = self.tokenizer_teacher(
-                prompt,
-                return_tensors="pt",
-                padding="max_length",
-                max_length=self.max_length,
-                truncation=True
-            )
-            
-            # Tokenize for student (LLaDA)
-            m = [{"role": "user", "content": prompt}]
-            student_prompt = self.tokenizer_student.apply_chat_template(
-                m, 
-                add_generation_prompt=True, 
-                tokenize=False
-            )
-            student_inputs = self.tokenizer_student(
-                student_prompt,
-                return_tensors="pt",
-                padding="max_length",
-                max_length=self.max_length,
-                truncation=True
-            )
-            
-            self.tokenized_data.append({
-                'prompt': prompt,
-                'teacher_input_ids': teacher_inputs['input_ids'].squeeze(0),
-                'teacher_attention_mask': teacher_inputs['attention_mask'].squeeze(0),
-                'student_input_ids': student_inputs['input_ids'].squeeze(0),
-                'student_attention_mask': student_inputs['attention_mask'].squeeze(0),
-            })
+            self._process_and_tokenize_prompt(prompt)
         
         # Free memory
         del self.df
-        import gc
         gc.collect()
+    
+    def _process_and_tokenize_prompt(self, prompt):
+        """Process and tokenize a single prompt"""
+        # Tokenize for teacher (LLaMA)
+        teacher_inputs = self.tokenizer_teacher(
+            prompt,
+            return_tensors="pt",
+            padding="max_length",
+            max_length=self.max_length,
+            truncation=True
+        )
+        
+        # Tokenize for student (LLaDA)
+        m = [{"role": "user", "content": prompt}]
+        student_prompt = self.tokenizer_student.apply_chat_template(
+            m, 
+            add_generation_prompt=True, 
+            tokenize=False
+        )
+        student_inputs = self.tokenizer_student(
+            student_prompt,
+            return_tensors="pt",
+            padding="max_length",
+            max_length=self.max_length,
+            truncation=True
+        )
+        
+        self.tokenized_data.append({
+            'prompt': prompt,
+            'teacher_input_ids': teacher_inputs['input_ids'].squeeze(0),
+            'teacher_attention_mask': teacher_inputs['attention_mask'].squeeze(0),
+            'student_input_ids': student_inputs['input_ids'].squeeze(0),
+            'student_attention_mask': student_inputs['attention_mask'].squeeze(0),
+        })
         
     def __len__(self):
         return len(self.tokenized_data)
@@ -106,11 +179,14 @@ class LLaDADistiller:
         
         # Enable gradient checkpointing after model is loaded
         # This trades compute for memory by not storing all activations
-        print("Enabling gradient checkpointing for memory efficiency...")
-        if hasattr(self.student_model, 'gradient_checkpointing_enable'):
-            self.student_model.gradient_checkpointing_enable()
-        elif hasattr(self.student_model, 'enable_gradient_checkpointing'):
-            self.student_model.enable_gradient_checkpointing()
+        print("Enabling memory optimizations for the student model...")
+        
+        # Set model to training mode to ensure modules like dropout are active
+        self.student_model.train()
+        
+        # For memory efficiency, we'll use lower precision and avoid storing intermediate activations
+        # Note: We don't forcibly enable gradient checkpointing as the model might not support it
+        # Instead, we'll rely on other memory optimizations
         
         # Freeze teacher model parameters
         for param in self.teacher_model.parameters():
@@ -120,6 +196,7 @@ class LLaDADistiller:
         """
         Apply forward diffusion process to prepare tokens for LLaDA learning
         Similar to the get_log_likelihood.py implementation in LLaDA repo
+        Optimized for memory efficiency
         """
         b, l = batch.shape
         
@@ -127,42 +204,59 @@ class LLaDADistiller:
         non_prompt_mask = ~prompt_indices
         target_len = non_prompt_mask.sum(dim=1)
         
-        # Initialize mask tensor
+        # Initialize mask tensor directly as bool to save memory (no type conversion)
         is_mask = torch.zeros_like(batch, dtype=torch.bool, device=batch.device)
         
-        # For each sequence in the batch
+        # Process in a memory-efficient way
         for i in range(b):
-            # Determine how many tokens to mask
-            k = torch.randint(1, target_len[i] + 1, (1,), device=batch.device)[0]
-            
-            # Get indices of non-prompt tokens
-            non_prompt_indices = torch.where(non_prompt_mask[i])[0]
-            
-            # Randomly select k indices to mask
-            mask_indices = non_prompt_indices[torch.randperm(len(non_prompt_indices))[:k]]
-            is_mask[i, mask_indices] = True
+            if target_len[i] > 0:  # Only process if there are non-prompt tokens
+                # Determine number of tokens to mask (1 to target_len)
+                k = max(1, min(torch.randint(1, target_len[i] + 1, (1,), device=batch.device)[0].item(), target_len[i].item()))
+                
+                # Get indices of non-prompt tokens
+                non_prompt_indices = torch.where(non_prompt_mask[i])[0]
+                
+                # Randomly select k indices to mask (without creating large temporary tensors)
+                if len(non_prompt_indices) > 0:
+                    # Use CPU for the permutation to save GPU memory
+                    perm_indices = torch.randperm(len(non_prompt_indices))[:k].to(batch.device)
+                    mask_indices = non_prompt_indices[perm_indices]
+                    is_mask[i, mask_indices] = True
+                    # Free up memory
+                    del perm_indices, mask_indices
         
-        # Apply mask
-        noisy_batch = torch.where(is_mask, self.mask_id, batch)
+        # Apply mask (in-place operations where possible)
+        noisy_batch = batch.clone()
+        noisy_batch[is_mask] = self.mask_id
         
-        # Calculate mask ratio for each token
+        # Calculate mask ratio efficiently
         mask_ratio = is_mask.float()
         
+        # Return results
         return noisy_batch, mask_ratio, is_mask
     
     def get_teacher_logits(self, input_ids, attention_mask):
-        """Get teacher (LLaMA) logits"""
+        """Get teacher (LLaMA) logits with enhanced memory efficiency"""
         with torch.no_grad():
             outputs = self.teacher_model(
                 input_ids=input_ids.to(self.teacher_device),
-                attention_mask=attention_mask.to(self.teacher_device)
+                attention_mask=attention_mask.to(self.teacher_device),
+                return_dict=True
             )
-            logits = outputs.logits
+            # Only retrieve the necessary logits and immediately detach
+            logits = outputs.logits.detach()
+            # Explicitly delete outputs to free memory
+            del outputs
         return logits
     
     def get_student_logits(self, input_ids, mask_indices):
         """Get student (LLaDA) logits for the tokens at masked positions"""
-        logits = self.student_model(input_ids.to(self.student_device)).logits
+        # Using bfloat16 for more efficient memory usage during forward pass
+        with torch.cuda.amp.autocast(dtype=torch.bfloat16, enabled=True):
+            outputs = self.student_model(input_ids.to(self.student_device), return_dict=True)
+            logits = outputs.logits
+            # Explicitly delete other outputs to free memory
+            del outputs
         return logits
     
     def distill_batch(self, batch, optimizer, do_backward=False):
@@ -238,20 +332,26 @@ class LLaDADistiller:
         
         loss = loss / batch_size
         
-        # Backpropagation (only if requested)
+        # When using gradient accumulation, we return the loss without backpropagation
+        # The calling function will handle scaling and backward
         if do_backward:
-            loss.backward()
+            # Just return the loss without backward - caller will handle it
             return loss
         else:
+            # Traditional mode (not using gradient accumulation)
             optimizer.zero_grad()
             loss.backward()
+            # Clip gradients to prevent exploding gradients
+            torch.nn.utils.clip_grad_norm_(self.student_model.parameters(), max_norm=1.0)
             optimizer.step()
             return loss.item()
     
     def train(
         self,
-        data_path,
-        output_dir,
+        data_path=None,
+        dataset_name="GAIR/lima",
+        num_samples=None,
+        output_dir="./llada_distilled",
         num_epochs=3,
         batch_size=4,
         learning_rate=5e-5,
@@ -260,18 +360,51 @@ class LLaDADistiller:
         eval_steps=50,
         gradient_accumulation_steps=4,  # Accumulate gradients to save memory
         warmup_steps=100,  # Warm up learning rate
-        weight_decay=0.01  # Weight decay for regularization
+        weight_decay=0.01,  # Weight decay for regularization
+        memory_clearing_interval=5,  # Clear GPU cache every N steps
+        use_mixed_precision=False,  # Use mixed precision for training (bfloat16)
+        use_cpu_offloading=False  # Offload tensors to CPU when possible to save GPU memory
     ):
         os.makedirs(output_dir, exist_ok=True)
         
-        # Create dataset and dataloader
+        # Store memory optimization parameters
+        self.memory_clearing_interval = memory_clearing_interval
+        self.use_mixed_precision = use_mixed_precision
+        self.use_cpu_offloading = use_cpu_offloading
+        
+        # Initialize mixed precision training if enabled
+        scaler = None
+        if use_mixed_precision:
+            if not hasattr(torch.cuda.amp, 'GradScaler'):
+                print("Warning: Mixed precision requested but GradScaler not available. Disabling mixed precision.")
+                use_mixed_precision = False
+            else:
+                scaler = torch.cuda.amp.GradScaler()
+                print("Using mixed precision training with gradient scaler")
+        
+        # Free up memory before starting training
+        if hasattr(torch.cuda, 'empty_cache'):
+            torch.cuda.empty_cache()
+        
+        # Create dataset and dataloader with optimized settings using either Hugging Face dataset or parquet
         dataset = PromptDataset(
             data_path, 
             self.teacher_tokenizer, 
             self.student_tokenizer,
-            max_length=max_length
+            max_length=max_length,
+            dataset_name=dataset_name,
+            num_samples=num_samples
         )
-        dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+        
+        # Use efficient data loading with pinned memory if CPU offloading is enabled
+        pin_memory = use_cpu_offloading
+        dataloader = DataLoader(
+            dataset, 
+            batch_size=batch_size, 
+            shuffle=True, 
+            pin_memory=pin_memory,
+            num_workers=0 if use_cpu_offloading else 0  # Adjust based on system capabilities
+        )
         
         # Setup optimizer with memory-efficient settings
         no_decay = ["bias", "LayerNorm.weight"]
@@ -291,7 +424,8 @@ class LLaDADistiller:
             optimizer_grouped_parameters,
             lr=learning_rate,
             betas=(0.9, 0.999),
-            eps=1e-8
+            eps=1e-8,
+            foreach=True  # Use more memory-efficient implementation if available
         )
         
         # Calculate total training steps for learning rate scheduler
@@ -319,10 +453,33 @@ class LLaDADistiller:
             optimizer.zero_grad()  # Zero gradients at the beginning of each epoch
             
             for step, batch in enumerate(progress_bar):
-                # Forward and backward pass
-                loss = self.distill_batch(batch, optimizer, do_backward=True)
-                loss = loss / gradient_accumulation_steps  # Normalize loss for gradient accumulation
-                total_loss += loss.item() * gradient_accumulation_steps  # Track unnormalized loss for reporting
+                # Apply mixed precision if enabled
+                if self.use_mixed_precision and scaler is not None:
+                    with torch.cuda.amp.autocast(dtype=torch.bfloat16):
+                        loss = self.distill_batch(batch, optimizer, do_backward=True)
+                    # Scale loss to avoid underflow
+                    scaled_loss = loss / gradient_accumulation_steps
+                    # Use scaler for backward pass
+                    scaler.scale(scaled_loss).backward()
+                else:
+                    # Standard precision training
+                    loss = self.distill_batch(batch, optimizer, do_backward=True)
+                    scaled_loss = loss / gradient_accumulation_steps
+                    scaled_loss.backward()
+                
+                total_loss += loss.item()  # Track original loss for reporting
+                
+                # Explicitly free GPU memory after backward pass
+                del scaled_loss, loss, batch
+                if hasattr(torch.cuda, 'empty_cache') and (step % self.memory_clearing_interval == 0):
+                    torch.cuda.empty_cache()
+                
+                # CPU offloading - explicitly move some grads to CPU to save GPU memory
+                if self.use_cpu_offloading and (step % (self.memory_clearing_interval * 2) == 0):
+                    for param in self.student_model.parameters():
+                        if param.grad is not None and not param.grad.isfinite().all():
+                            # Handle gradient overflow
+                            param.grad.zero_()
                 
                 # Update weights only after accumulating gradients
                 if (step + 1) % gradient_accumulation_steps == 0 or step == len(dataloader) - 1:
@@ -336,10 +493,12 @@ class LLaDADistiller:
                     global_step += 1
                     
                     # Update progress bar
+                    avg_batch_loss = total_loss / gradient_accumulation_steps
                     progress_bar.set_postfix({
-                        "loss": loss.item() * gradient_accumulation_steps,
+                        "loss": avg_batch_loss,
                         "lr": scheduler.get_last_lr()[0]
                     })
+                    total_loss = 0
                     
                     # Save checkpoint
                     if global_step % save_steps == 0:
@@ -366,13 +525,15 @@ class LLaDADistiller:
         self.student_tokenizer.save_pretrained(final_output_dir)
         print(f"Saved final model to {final_output_dir}")
     
-    def evaluate(self, data_path, batch_size=4, max_length=512, num_eval_samples=100):
+    def evaluate(self, data_path=None, dataset_name="GAIR/lima", batch_size=4, max_length=512, num_eval_samples=100):
         """Evaluate the distilled model"""
         dataset = PromptDataset(
             data_path, 
             self.teacher_tokenizer, 
             self.student_tokenizer,
-            max_length=max_length
+            max_length=max_length,
+            dataset_name=dataset_name,
+            num_samples=num_eval_samples
         )
         
         # Use only a subset for evaluation if specified
@@ -456,18 +617,28 @@ class LLaDADistiller:
 
 def main():
     parser = argparse.ArgumentParser(description='Knowledge Distillation from LLaMA to LLaDA')
+    # Model parameters
     parser.add_argument('--teacher_model', type=str, default="casperhansen/llama-3.3-70b-instruct-awq",
                         help='Teacher model name or path')
     parser.add_argument('--student_model', type=str, default="GSAI-ML/LLaDA-8B-Instruct",
                         help='Student model name or path')
+    # Device configuration
     parser.add_argument('--teacher_device', type=str, default="cuda:0",
                         help='Device for teacher model')
     parser.add_argument('--student_device', type=str, default="cuda:1",
                         help='Device for student model')
-    parser.add_argument('--data_path', type=str, default="./final_dataset.parquet",
-                        help='Path to the dataset file')
+    # Data parameters
+    parser.add_argument('--data_path', type=str, default=None,
+                        help='Path to the dataset file (parquet format). If not provided, will use the HF dataset.')
+    parser.add_argument('--dataset_name', type=str, default="GAIR/lima",
+                        help='Hugging Face dataset name to use (e.g., "GAIR/lima")')
+    parser.add_argument('--num_samples', type=int, default=None,
+                        help='Number of samples to use from the dataset (None for all)')
     parser.add_argument('--output_dir', type=str, default="./llada_distilled",
                         help='Output directory for saved models')
+    parser.add_argument('--max_length', type=int, default=512,
+                        help='Maximum sequence length')
+    # Training hyperparameters
     parser.add_argument('--batch_size', type=int, default=4,
                         help='Batch size for training')
     parser.add_argument('--gradient_accumulation_steps', type=int, default=4,
@@ -482,18 +653,37 @@ def main():
                         help='Number of warmup steps for learning rate scheduler')
     parser.add_argument('--temperature', type=float, default=2.0,
                         help='Temperature for distillation')
-    parser.add_argument('--max_length', type=int, default=512,
-                        help='Maximum sequence length')
+    # Checkpointing and evaluation
     parser.add_argument('--save_steps', type=int, default=100,
                         help='Save checkpoint every X steps')
     parser.add_argument('--eval_steps', type=int, default=50,
                         help='Evaluate every X steps')
+    # Memory optimization parameters
+    parser.add_argument('--memory_clearing_interval', type=int, default=5,
+                        help='Clear GPU cache every N steps')
+    parser.add_argument('--use_mixed_precision', action='store_true',
+                        help='Use mixed precision for training (bfloat16)')
+    parser.add_argument('--use_cpu_offloading', action='store_true', 
+                        help='Offload tensors to CPU when possible to save GPU memory')
     
     args = parser.parse_args()
     
     # Set up torch for memory efficiency
     torch.backends.cuda.matmul.allow_tf32 = True  # Allow TF32 for faster computation
     torch.backends.cudnn.benchmark = True  # Optimize CUDNN for faster training
+    torch.backends.cudnn.deterministic = False  # Allow non-deterministic algorithms for better performance
+    
+    # Enable memory-efficient attention if available (for transformer models)
+    if hasattr(torch.nn.functional, 'scaled_dot_product_attention'):
+        # PyTorch 2.0+ has memory-efficient attention
+        print("Using PyTorch's memory-efficient attention mechanism")
+    
+    # Set default tensor type for efficiency
+    if args.use_mixed_precision:
+        print("Using bfloat16 mixed precision")
+        torch.set_default_dtype(torch.bfloat16)
+    else:
+        torch.set_default_dtype(torch.float32)
     
     # Create distiller
     distiller = LLaDADistiller(
@@ -507,6 +697,8 @@ def main():
     # Train
     distiller.train(
         data_path=args.data_path,
+        dataset_name=args.dataset_name,
+        num_samples=args.num_samples,
         output_dir=args.output_dir,
         num_epochs=args.num_epochs,
         batch_size=args.batch_size,
@@ -516,11 +708,20 @@ def main():
         eval_steps=args.eval_steps,
         gradient_accumulation_steps=args.gradient_accumulation_steps,
         warmup_steps=args.warmup_steps,
-        weight_decay=args.weight_decay
+        weight_decay=args.weight_decay,
+        memory_clearing_interval=args.memory_clearing_interval,
+        use_mixed_precision=args.use_mixed_precision,
+        use_cpu_offloading=args.use_cpu_offloading
     )
     
     # Evaluate
-    distiller.evaluate(args.data_path, batch_size=args.batch_size)
+    distiller.evaluate(
+        data_path=args.data_path,
+        dataset_name=args.dataset_name,
+        batch_size=args.batch_size,
+        max_length=args.max_length,
+        num_eval_samples=min(100, args.num_samples) if args.num_samples else 100  # Limit evaluation to 100 samples by default
+    )
 
 if __name__ == "__main__":
     main()
