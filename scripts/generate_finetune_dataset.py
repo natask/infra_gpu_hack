@@ -9,6 +9,9 @@ import tqdm
 import pandas as pd
 import torch
 import time
+from torch.nn.attention import SDPBackend, sdpa_kernel
+# Only enable flash attention backend
+    
 os.environ['HF_HOME'] = '/mount/model-cache'
 
 def main():
@@ -18,9 +21,7 @@ def main():
     # True
     print(torch.backends.cuda.math_sdp_enabled())
     # True
-    with torch.nn.attention.sdpa_kernel(
-        enable_flash=True, enable_math=False, enable_mem_efficient=False
-    ):
+    with sdpa_kernel(SDPBackend.FLASH_ATTENTION):
         parser = argparse.ArgumentParser(description="Generate model outputs")
         parser.add_argument("--model_name", type=str, default="casperhansen/Llama-3.3-70B-instruct-awq", help="Hugging Face model name or path")
         parser.add_argument("--dataset_name", type=str, default='final_dataset.parquet', help="Name of the dataset file (without path) in parquet")
