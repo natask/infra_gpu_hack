@@ -13,22 +13,32 @@ import gc
 
 class PromptDataset(Dataset):
     def __init__(self, data_path, tokenizer_teacher, tokenizer_student, max_length=512, dataset_name="GAIR/lima", num_samples=None):
-        # If data_path is provided and it's not the dataset name, use it for backward compatibility
-        if data_path and not data_path.startswith("GAIR/"):
-            # Legacy mode: load from parquet file
-            print(f"Loading data from parquet file: {data_path}")
-            self.df = pd.read_parquet(data_path, columns=['question'])
-            if num_samples:
-                self.df = self.df.iloc[:num_samples]
-            self._load_from_dataframe()
-        else:
-            # New mode: load from Hugging Face dataset
-            self._load_from_huggingface(dataset_name, num_samples)
-        
-        # Set tokenizers and max length
+        # Set tokenizers and max length first to ensure they're available for all methods
         self.tokenizer_teacher = tokenizer_teacher
         self.tokenizer_student = tokenizer_student
         self.max_length = max_length
+        
+        # Determine how to load the data based on the provided path
+        if data_path and os.path.exists(data_path):
+            if os.path.isdir(data_path):
+                # Check if directory contains JSON files (like GAIR/LIMO format)
+                json_files = [f for f in os.listdir(data_path) if f.endswith('.json')]
+                if json_files:
+                    print(f"Loading data from local JSON files in: {data_path}")
+                    self._load_from_local_json(data_path, json_files, num_samples)
+                    return
+            
+            # If path is a file, try loading as parquet
+            if os.path.isfile(data_path):
+                print(f"Loading data from parquet file: {data_path}")
+                self.df = pd.read_parquet(data_path, columns=['question'])
+                if num_samples:
+                    self.df = self.df.iloc[:num_samples]
+                self._load_from_dataframe()
+                return
+        
+        # If not a local file or directory, try loading from Hugging Face
+        self._load_from_huggingface(dataset_name, num_samples)
     
     def _load_from_huggingface(self, dataset_name="GAIR/lima", num_samples=None):
         """Load data efficiently from Hugging Face datasets"""
@@ -48,10 +58,12 @@ class PromptDataset(Dataset):
             
             # Print dataset features to help debug
             print(f"Dataset features: {self.data.column_names}")
+            print(f"Dataset size: {len(self.data)} examples")
             
             # Limit number of samples if specified
             if num_samples is not None:
                 self.data = self.data.select(range(min(num_samples, len(self.data))))
+                print(f"Limited to {num_samples} samples")
             
             # Pre-tokenize data to speed up training
             print("Pre-tokenizing data to speed up training...")
@@ -62,35 +74,79 @@ class PromptDataset(Dataset):
             
             # Determine which field to use based on dataset column names
             columns = self.data.column_names
+            print(f"Available columns: {columns}")
+            
+            # Sample first example to understand structure
+            first_example = self.data[0]
+            print(f"First example keys: {first_example.keys()}")
             
             # Check if required columns exist in the dataset
             has_conversations = "conversations" in columns
             has_instruction = "instruction" in columns
             has_text = "text" in columns
             has_question = "question" in columns
+            has_context = "context" in columns
             
-            for i in tqdm(range(0, len(self.data), batch_size)):
-                batch = self.data[i:min(i+batch_size, len(self.data))]
-                
-                # Extract prompts from the dataset based on available columns
-                if has_conversations:
-                    # Format for chat datasets
-                    prompts = [self._format_conversations(item["conversations"]) for item in batch]
-                elif has_instruction:
-                    # Format for instruction datasets
-                    prompts = [item["instruction"] for item in batch]
-                elif has_question:
-                    # Use question field if available
-                    prompts = [item["question"] for item in batch]
-                elif has_text:
-                    # Default to 'text' field
-                    prompts = [item["text"] for item in batch]
-                else:
-                    # If none of the expected fields exist, use the first column
-                    first_column = columns[0]
-                    prompts = [item[first_column] for item in batch]
+            # For GAIR/lima specifically
+            if dataset_name == "GAIR/lima":
+                prompts = []
+                for i in tqdm(range(len(self.data))):
+                    item = self.data[i]
+                    # Extract prompt based on dataset-specific structure
+                    try:
+                        # Check if the item has 'question' field (as seen in the local GAIR/LIMO files)
+                        if "question" in item:
+                            if "solution" in item:
+                                # Format as a question-answer pair
+                                prompt = f"Question: {item['question']}\n\nAnswer: {item['solution']}"
+                            else:
+                                # Just use the question
+                                prompt = f"Question: {item['question']}"
+                        elif "conversations" in item:
+                            prompt = self._format_conversations(item["conversations"])
+                        else:
+                            # Try to use the first column as fallback
+                            prompt = str(item[columns[0]])
+                        prompts.append(prompt)
+                    except Exception as e:
+                        print(f"Error extracting prompt from item {i}: {str(e)}")
+                        continue
+            else:
+                # General approach for other datasets
+                prompts = []
+                for i in tqdm(range(0, len(self.data), batch_size)):
+                    batch = self.data[i:min(i+batch_size, len(self.data))]
+                    batch_prompts = []
+                    
+                    # Extract prompts from the dataset based on available columns
+                    for item in batch:
+                        try:
+                            if has_conversations:
+                                prompt = self._format_conversations(item["conversations"])
+                            elif has_instruction:
+                                prompt = item["instruction"]
+                            elif has_question:
+                                # For SQuAD-like datasets, combine question with context
+                                if has_context:
+                                    prompt = f"Context: {item['context']}\n\nQuestion: {item['question']}"
+                                else:
+                                    prompt = item["question"]
+                            elif has_text:
+                                prompt = item["text"]
+                            else:
+                                # If none of the expected fields exist, use the first column
+                                first_column = columns[0]
+                                prompt = str(item[first_column])
+                            
+                            batch_prompts.append(prompt)
+                        except Exception as e:
+                            print(f"Error extracting prompt: {str(e)}")
+                            continue
+                    
+                    prompts.extend(batch_prompts)
             
             # Process each prompt with error handling
+            print(f"Processing {len(prompts)} prompts...")
             for prompt in prompts:
                 try:
                     if prompt is None or not isinstance(prompt, str):
@@ -100,6 +156,8 @@ class PromptDataset(Dataset):
                 except Exception as e:
                     print(f"Error processing prompt: {str(e)}")
                     continue
+            
+            print(f"Successfully processed {len(self.tokenized_data)} prompts")
         
             # Free memory
             del self.data
@@ -122,11 +180,60 @@ class PromptDataset(Dataset):
     
     def _format_conversations(self, conversations):
         """Extract the first user message from conversations"""
-        for turn in conversations:
-            if turn.get("from") == "human" or turn.get("role") == "user":
-                return turn.get("value") or turn.get("content")
-        return conversations[0].get("value") or conversations[0].get("content")
+        # If conversations is a string, return it directly
+        if isinstance(conversations, str):
+            return conversations
+            
+        # If conversations is a list, process it
+        if isinstance(conversations, list):
+            for turn in conversations:
+                if isinstance(turn, dict):
+                    if turn.get("from") == "human" or turn.get("role") == "user":
+                        return turn.get("value") or turn.get("content")
+            # If no human/user message was found, return the first message content
+            if len(conversations) > 0 and isinstance(conversations[0], dict):
+                return conversations[0].get("value") or conversations[0].get("content")
+        
+        # If we couldn't extract anything, return a default message
+        return "Unable to extract prompt from conversations"
     
+    def _load_from_local_json(self, data_dir, json_files, num_samples=None):
+        """Load data from local JSON files (like GAIR/LIMO format)"""
+        import json
+        self.tokenized_data = []
+        
+        # Limit the number of files if num_samples is specified
+        if num_samples is not None and num_samples < len(json_files):
+            json_files = json_files[:num_samples]
+            print(f"Limited to {num_samples} files")
+            
+        print(f"Processing {len(json_files)} JSON files...")
+        for filename in tqdm(json_files):
+            file_path = os.path.join(data_dir, filename)
+            try:
+                with open(file_path, 'r') as f:
+                    data = json.load(f)
+                
+                # Handle different formats in the JSON files
+                if "question" in data:
+                    if "solution" in data:
+                        prompt = f"Question: {data['question']}\n\nAnswer: {data['solution']}"
+                    else:
+                        prompt = f"Question: {data['question']}"
+                elif "conversations" in data:
+                    prompt = self._format_conversations(data["conversations"])
+                else:
+                    # Try to use the first key as fallback
+                    first_key = list(data.keys())[0]
+                    prompt = str(data[first_key])
+                
+                self._process_and_tokenize_prompt(prompt)
+            except Exception as e:
+                print(f"Error processing file {filename}: {str(e)}")
+                continue
+                
+        print(f"Successfully processed {len(self.tokenized_data)} files")
+
     def _load_from_dataframe(self):
         """Load and process data from pandas DataFrame"""
         # Pre-tokenize data to speed up training
@@ -153,12 +260,19 @@ class PromptDataset(Dataset):
         )
         
         # Tokenize for student (LLaDA)
-        m = [{"role": "user", "content": prompt}]
-        student_prompt = self.tokenizer_student.apply_chat_template(
-            m, 
-            add_generation_prompt=True, 
-            tokenize=False
-        )
+        # Check if apply_chat_template is available
+        if hasattr(self.tokenizer_student, 'apply_chat_template'):
+            # For chat-based models like Llama
+            m = [{"role": "user", "content": prompt}]
+            student_prompt = self.tokenizer_student.apply_chat_template(
+                m, 
+                add_generation_prompt=True, 
+                tokenize=False
+            )
+        else:
+            # For models without chat template support like BERT
+            student_prompt = prompt
+            
         student_inputs = self.tokenizer_student(
             student_prompt,
             return_tensors="pt",
@@ -199,10 +313,23 @@ class LLaDADistiller:
         # Load teacher model (LLaMA)
         print(f"Loading teacher model {teacher_model_name} on {teacher_device}...")
         self.teacher_tokenizer = AutoTokenizer.from_pretrained(teacher_model_name)
+        
+        # Handle different device specifications
+        teacher_kwargs = {}
+        if teacher_device.lower() == "cpu":
+            teacher_kwargs["device_map"] = None
+            teacher_kwargs["torch_dtype"] = torch.float32  # CPU typically uses float32 for better compatibility
+        elif teacher_device.startswith("cuda"):
+            teacher_kwargs["device_map"] = "auto"  # Let the model decide optimal placement
+            teacher_kwargs["torch_dtype"] = torch.float16
+        else:
+            # For other device map options (auto, balanced, etc.)
+            teacher_kwargs["device_map"] = teacher_device
+            teacher_kwargs["torch_dtype"] = torch.float16
+        
         self.teacher_model = AutoModelForCausalLM.from_pretrained(
             teacher_model_name,
-            device_map=teacher_device,
-            torch_dtype=torch.float16
+            **teacher_kwargs
         )
         self.teacher_model.eval()  # Teacher is always in eval mode
         
@@ -212,11 +339,26 @@ class LLaDADistiller:
             student_model_name, 
             trust_remote_code=True
         )
+        
+        # Handle different device specifications for student model
+        student_kwargs = {
+            "trust_remote_code": True
+        }
+        
+        if student_device.lower() == "cpu":
+            student_kwargs["device_map"] = None
+            student_kwargs["torch_dtype"] = torch.float32  # CPU typically uses float32 for better compatibility
+        elif student_device.startswith("cuda"):
+            student_kwargs["device_map"] = "auto"  # Let the model decide optimal placement
+            student_kwargs["torch_dtype"] = torch.bfloat16
+        else:
+            # For other device map options (auto, balanced, etc.)
+            student_kwargs["device_map"] = student_device
+            student_kwargs["torch_dtype"] = torch.bfloat16
+        
         self.student_model = AutoModel.from_pretrained(
             student_model_name,
-            device_map=student_device,
-            trust_remote_code=True, 
-            torch_dtype=torch.bfloat16
+            **student_kwargs
         )
         
         # Enable gradient checkpointing after model is loaded
