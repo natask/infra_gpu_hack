@@ -3,7 +3,7 @@ import os
 import argparse
 import json
 from custom_dataset import get_dataloader
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import LlamaForCausalLM, AutoTokenizer
 import torch
 import tqdm
 import pandas as pd
@@ -33,7 +33,7 @@ def main():
         # Load model and tokenizer
         
         tokenizer = AutoTokenizer.from_pretrained(args.model_name)
-        model = AutoModelForCausalLM.from_pretrained(args.model_name).to('cuda' if torch.cuda.is_available() else 'cpu')
+        model = LlamaForCausalLM.from_pretrained(args.model_name).to('cuda' if torch.cuda.is_available() else 'cpu')
         model.eval()
         print(f"cuda is avaliable: {torch.cuda.is_available()}")
 
