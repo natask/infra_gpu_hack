@@ -25,6 +25,7 @@ def main():
         parser.add_argument("--model_name", type=str, default="casperhansen/Llama-3.3-70B-instruct-awq", help="Hugging Face model name or path")
         parser.add_argument("--dataset_name", type=str, default='final_dataset.parquet', help="Name of the dataset file (without path) in parquet")
         parser.add_argument("--batch_size", type=int, default=8, help="Batch size for inference")
+        parser.add_argument("--name", type=str, default="llama70b", help="Model string name")
         parser.add_argument("--max_length", type=int, default=2080, help="Max generation length")
         args = parser.parse_args()
 
@@ -48,8 +49,8 @@ def main():
 
         # Prepare the output files
         gpu_id = 0
-        messages_output_path = os.path.join('../', f'{args.model_name}__messages_output{gpu_id}.json')
-        time_output_path = os.path.join('../', f'{args.model_name}__time_output{gpu_id}.json')
+        messages_output_path = os.path.join('../', f'{args.name}__messages_output{gpu_id}.json')
+        time_output_path = os.path.join('../', f'{args.name}__time_output{gpu_id}.json')
 
         # Ensure the files exist by opening them in write mode initially
         open(messages_output_path, 'w').close()
