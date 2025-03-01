@@ -8,6 +8,8 @@ import torch
 import tqdm
 import pandas as pd
 import torch
+os.environ['HF_HOME'] = '/mount/model-cache'
+os.environ['HF_HUB_CACHE'] = '/mount/model-cache'
 
 def main():
     print(torch.backends.cuda.flash_sdp_enabled())
