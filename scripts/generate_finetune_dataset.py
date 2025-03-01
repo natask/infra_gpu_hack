@@ -47,9 +47,13 @@ def main():
         early_stopping = True
 
         # Prepare the output files
-        messages_output_path = f'{args.model_name}__messages_output.json'
-        time_output_path = f'{args.model_name}__time_output.json'
+        gpu_id = 0
+        messages_output_path = os.path.join('../', f'{args.model_name}__messages_output{gpu_id}.json')
+        time_output_path = os.path.join('../', f'{args.model_name}__time_output{gpu_id}.json')
 
+        # Ensure the files exist by opening them in write mode initially
+        open(messages_output_path, 'w').close()
+        open(time_output_path, 'w').close()
         # Open the files in append mode
         messages_file = open(messages_output_path, 'a')
         time_file = open(time_output_path, 'a')
