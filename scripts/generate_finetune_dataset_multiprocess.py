@@ -2,6 +2,7 @@
 import os
 import argparse
 import csv
+import json
 from custom_dataset import get_dataloader
 from transformers import LlamaForCausalLM, AutoTokenizer
 import torch
@@ -37,7 +38,7 @@ def process_on_gpu(gpu_id, args, start_index, end_index=None):
     # Create files with headers
     with open(messages_output_path, 'w', newline='') as f:
         writer = csv.writer(f)
-        writer.writerow(['role', 'content'])
+        writer.writerow(['role', 'content', 'info'])
     
     with open(time_output_path, 'w', newline='') as f:
         writer = csv.writer(f)
@@ -68,11 +69,51 @@ You are a helpful assistant.
 <|end_of_text|>"""
         inputs = tokenizer(question, return_tensors="pt").to(device)
         start_time = time.time()
-        outputs = model.generate(inputs.input_ids, max_length=args.max_length, num_beams=num_beams, no_repeat_ngram_size=no_repeat_ngram_size, early_stopping=early_stopping)
+        
+        # Custom generation to capture logits
+        input_ids = inputs.input_ids
+        attention_mask = torch.ones_like(input_ids)
+        generated_tokens = []
+        token_info = []
+        top_k = 5  # Number of top tokens to save
+        
+        with torch.no_grad():
+            # Start with the input sequence
+            current_ids = input_ids.clone()
+            
+            # Generate until max length or end token
+            for _ in range(args.max_length - input_ids.size(1)):
+                # Get model outputs
+                outputs = model(input_ids=current_ids, attention_mask=attention_mask)
+                next_token_logits = outputs.logits[:, -1, :]
+                
+                # Get top-k tokens and their logits
+                topk_logits, topk_indices = torch.topk(next_token_logits, top_k, dim=-1)
+                
+                # Convert to lists for storage
+                topk_tokens = [tokenizer.decode([idx.item()]) for idx in topk_indices[0]]
+                topk_ids = topk_indices[0].tolist()
+                topk_logit_values = topk_logits[0].tolist()
+                
+                # Store the information for this position
+                token_info.append([topk_tokens, [topk_ids], [topk_logit_values]])
+                
+                # Select the next token (top-1 for greedy decoding)
+                next_token = topk_indices[0, 0].unsqueeze(0).unsqueeze(0)
+                generated_tokens.append(next_token.item())
+                
+                # Update the input sequence
+                current_ids = torch.cat([current_ids, next_token], dim=1)
+                attention_mask = torch.cat([attention_mask, torch.ones_like(next_token)], dim=1)
+                
+                # Check if we've generated an end token
+                if next_token.item() == tokenizer.eos_token_id:
+                    break
+        
         generation_time = time.time() - start_time
         
         # Decode the generated solution
-        solution = tokenizer.batch_decode(outputs, skip_special_tokens=True, clean_up_tokenization_spaces=False)
+        solution = tokenizer.decode(generated_tokens, skip_special_tokens=True, clean_up_tokenization_spaces=False)
         
         # Write results to files
         with open(messages_output_path, 'a', newline='') as messages_file, open(time_output_path, 'a', newline='') as time_file:
@@ -80,10 +121,12 @@ You are a helpful assistant.
             messages_writer = csv.writer(messages_file)
             time_writer = csv.writer(time_file)
             
-            # Write user message
-            messages_writer.writerow(['user', question])
-            # Write assistant response
-            messages_writer.writerow(['assistant', solution[0]])
+            # Write user message (with empty info field)
+            messages_writer.writerow(['user', question, ''])
+            
+            # Write assistant response with token info
+            token_info_json = json.dumps(token_info)
+            messages_writer.writerow(['assistant', solution, token_info_json])
             
             print(f"GPU {gpu_id} - Index {index}: Generated response")
             

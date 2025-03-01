@@ -41,21 +41,46 @@ def csv_to_json(csv_file_path, json_file_path=None, format_type=None):
                 i = 0
                 while i < len(rows) - 1:
                     if rows[i][0] == 'user' and rows[i+1][0] == 'assistant':
-                        message_pair = [
-                            {"role": rows[i][0], "content": rows[i][1]},
-                            {"role": rows[i+1][0], "content": rows[i+1][1]}
-                        ]
+                        # Parse token info if available
+                        token_info = None
+                        if len(rows[i+1]) > 2 and rows[i+1][2]:
+                            try:
+                                token_info = json.loads(rows[i+1][2])
+                            except json.JSONDecodeError:
+                                print(f"Warning: Could not parse token info for row {i+1}")
+                        
+                        # Create user message
+                        user_message = {"role": rows[i][0], "content": rows[i][1]}
+                        if len(rows[i]) > 2 and rows[i][2]:
+                            user_message["info"] = rows[i][2]
+                        
+                        # Create assistant message
+                        assistant_message = {"role": rows[i+1][0], "content": rows[i+1][1]}
+                        if token_info is not None:
+                            assistant_message["info"] = token_info
+                        
+                        message_pair = [user_message, assistant_message]
                         result.append(message_pair)
                         i += 2
                     else:
                         # Handle unpaired messages
                         message = {"role": rows[i][0], "content": rows[i][1]}
+                        if len(rows[i]) > 2 and rows[i][2]:
+                            try:
+                                message["info"] = json.loads(rows[i][2]) if rows[i][2] else ""
+                            except json.JSONDecodeError:
+                                message["info"] = rows[i][2]
                         result.append([message])
                         i += 1
                 
                 # Handle any remaining row
                 if i < len(rows):
                     message = {"role": rows[i][0], "content": rows[i][1]}
+                    if len(rows[i]) > 2 and rows[i][2]:
+                        try:
+                            message["info"] = json.loads(rows[i][2]) if rows[i][2] else ""
+                        except json.JSONDecodeError:
+                            message["info"] = rows[i][2]
                     result.append([message])
                 
             elif format_type == 'time':
