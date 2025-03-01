@@ -32,7 +32,7 @@ def main():
         results = []
         # Load model and tokenizer
         
-        # base_dir = os.path.dirname(os.path.abspath(__file__))
+        base_dir = os.path.dirname(os.path.abspath(__file__))
         model = LlamaForCausalLM.from_pretrained(args.model_name).to('cuda')
         tokenizer = AutoTokenizer.from_pretrained(args.model_name)
         model.eval()
