@@ -87,6 +87,7 @@ You are a helpful assistant.
                 {"role": "user", "content": question},
                 {"role": "assistant", "content": solution}
             ]
+            print(message_entry)
             json.dump(message_entry, messages_file, indent=4)
             messages_file.write("\n")
 
@@ -95,8 +96,10 @@ You are a helpful assistant.
             tokens_per_second = num_tokens / generation_time
 
             # Record and save time elapsed
+            
             time_entry = {'question': question, 'generation_time': generation_time, 'tokens_per_second': tokens_per_second}
             json.dump(time_entry, time_file, indent=4)
+            print(time_entry)
             time_file.write("\n")
 
         # Close the files
