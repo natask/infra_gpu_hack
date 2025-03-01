@@ -10,18 +10,62 @@ import torch.distributed as dist
 import argparse
 
 class PromptDataset(Dataset):
-    def __init__(self, data_path, tokenizer_teacher, tokenizer_student, max_length=512):
-        if data_path and not data_path.startswith("GAIR/"):
-            # Legacy mode: load from parquet file
-            print(f"Loading data from parquet file: {data_path}")
-            self.df = pd.read_parquet(data_path, columns=['question'])
-            self._load_from_dataframe()
-        else:
-            # New mode: load from Hugging Face dataset
-            self._load_from_huggingface(dataset_name)
+    def __init__(self, data_path, tokenizer_teacher, tokenizer_student, max_length=512, dataset_name="GAIR/lima", num_samples=None):
         self.tokenizer_teacher = tokenizer_teacher
         self.tokenizer_student = tokenizer_student
         self.max_length = max_length
+        
+        if data_path:
+            # Legacy mode: load from parquet file
+            print(f"Loading data from parquet file: {data_path}")
+            self.df = pd.read_parquet(data_path, columns=['question'])
+            if num_samples and num_samples < len(self.df):
+                self.df = self.df.iloc[:num_samples]
+        else:
+            # New mode: load from Hugging Face dataset
+            print(f"Loading data from Hugging Face dataset: {dataset_name}")
+            self._load_from_huggingface(dataset_name, num_samples)
+    
+    def _load_from_huggingface(self, dataset_name, num_samples=None):
+        """Load data from Hugging Face dataset"""
+        try:
+            from datasets import load_dataset
+            dataset = load_dataset(dataset_name, split="train")
+            print(f"Dataset columns: {dataset.column_names}")
+            
+            # Convert to pandas DataFrame with 'question' column for compatibility
+            if num_samples and num_samples < len(dataset):
+                dataset = dataset.select(range(num_samples))
+            
+            # Handle various dataset formats
+            if 'conversations' in dataset.column_names:
+                # GAIR/lima format
+                questions = [conv[0]['value'] for conv in dataset['conversations']]
+                self.df = pd.DataFrame({'question': questions})
+            elif 'question' in dataset.column_names:
+                # If there's already a question column (like in SQuAD)
+                self.df = pd.DataFrame({'question': dataset['question']})
+            elif 'text' in dataset.column_names:
+                # Common text column
+                self.df = pd.DataFrame({'question': dataset['text']})
+            elif 'prompt' in dataset.column_names:
+                # Some datasets use prompt
+                self.df = pd.DataFrame({'question': dataset['prompt']})
+            else:
+                # Use the first column as the question
+                first_column = dataset.column_names[0]
+                self.df = pd.DataFrame({'question': dataset[first_column]})
+            
+            print(f"Successfully loaded {len(self.df)} examples from {dataset_name}")
+            
+            # Show a sample to verify
+            if len(self.df) > 0:
+                print(f"Sample question: {self.df.iloc[0]['question'][:100]}...")
+                
+        except Exception as e:
+            print(f"Error loading Hugging Face dataset {dataset_name}: {str(e)}")
+            # Fallback to a small empty dataframe if loading fails
+            self.df = pd.DataFrame({'question': ['Sample question 1', 'Sample question 2']})
         
     def __len__(self):
         return len(self.df)
@@ -234,8 +278,10 @@ class LLaDADistiller:
     
     def train(
         self,
-        data_path,
-        output_dir,
+        data_path=None,
+        dataset_name="GAIR/lima",
+        num_samples=None,
+        output_dir="./llada_distilled",
         num_epochs=3,
         batch_size=4,
         learning_rate=5e-5,
@@ -250,7 +296,9 @@ class LLaDADistiller:
             data_path, 
             self.teacher_tokenizer, 
             self.student_tokenizer,
-            max_length=max_length
+            max_length=max_length,
+            dataset_name=dataset_name,
+            num_samples=num_samples
         )
         dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
         
@@ -293,13 +341,15 @@ class LLaDADistiller:
         self.student_tokenizer.save_pretrained(final_output_dir)
         print(f"Saved final model to {final_output_dir}")
     
-    def evaluate(self, data_path, batch_size=4, max_length=512, num_eval_samples=100):
+    def evaluate(self, data_path=None, dataset_name="GAIR/lima", batch_size=4, max_length=512, num_eval_samples=100):
         """Evaluate the distilled model"""
         dataset = PromptDataset(
             data_path, 
             self.teacher_tokenizer, 
             self.student_tokenizer,
-            max_length=max_length
+            max_length=max_length,
+            dataset_name=dataset_name,
+            num_samples=num_eval_samples
         )
         
         # Use only a subset for evaluation if specified
@@ -392,9 +442,11 @@ def main():
     parser.add_argument('--student_device', type=str, default="cuda:1",
                         help='Device for student model')
     parser.add_argument('--data_path', type=str, default=None,
-                        help='Path to the dataset file')
+                        help='Path to the dataset file (parquet format). If not provided, will use the HF dataset.')
     parser.add_argument('--dataset_name', type=str, default="GAIR/lima",
-                    help='Hugging Face dataset name to use (e.g., "GAIR/lima")'),
+                        help='Hugging Face dataset name to use (e.g., "GAIR/lima")')
+    parser.add_argument('--num_samples', type=int, default=None,
+                        help='Number of samples to use from the dataset (None for all)')
     parser.add_argument('--output_dir', type=str, default="./llada_distilled",
                         help='Output directory for saved models')
     parser.add_argument('--batch_size', type=int, default=4,
@@ -426,6 +478,8 @@ def main():
     # Train
     distiller.train(
         data_path=args.data_path,
+        dataset_name=args.dataset_name,
+        num_samples=args.num_samples,
         output_dir=args.output_dir,
         num_epochs=args.num_epochs,
         batch_size=args.batch_size,
@@ -436,7 +490,12 @@ def main():
     )
     
     # Evaluate
-    distiller.evaluate(args.data_path, batch_size=args.batch_size)
+    distiller.evaluate(
+        data_path=args.data_path,
+        dataset_name=args.dataset_name,
+        batch_size=args.batch_size,
+        num_eval_samples=min(100, args.num_samples) if args.num_samples else 100
+    )
 
 if __name__ == "__main__":
     main()

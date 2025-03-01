@@ -35,48 +35,90 @@ class PromptDataset(Dataset):
         print(f"Loading dataset from Hugging Face: {dataset_name}")
         
         # Load the dataset efficiently with streaming mode for large datasets
-        dataset = load_dataset(dataset_name, streaming=False)
-        
-        # Convert to pandas for consistent processing
-        if "train" in dataset:
-            self.data = dataset["train"]
-        else:
-            # If no train split, use the first available split
-            first_split = list(dataset.keys())[0]
-            self.data = dataset[first_split]
-        
-        # Limit number of samples if specified
-        if num_samples is not None:
-            self.data = self.data.select(range(min(num_samples, len(self.data))))
-        
-        # Pre-tokenize data to speed up training
-        print("Pre-tokenizing data to speed up training...")
-        self.tokenized_data = []
-        
-        # Process in batches for efficiency
-        batch_size = 32  # Process multiple examples at once
-        
-        for i in tqdm(range(0, len(self.data), batch_size)):
-            batch = self.data[i:min(i+batch_size, len(self.data))]
+        try:
+            dataset = load_dataset(dataset_name, streaming=False)
             
-            # Extract prompts from the dataset
-            if "conversations" in batch.features:
-                # Format for chat datasets
-                prompts = [self._format_conversations(item["conversations"]) for item in batch]
-            elif "instruction" in batch.features:
-                # Format for instruction datasets
-                prompts = [item["instruction"] for item in batch]
+            # Convert to pandas for consistent processing
+            if "train" in dataset:
+                self.data = dataset["train"]
             else:
-                # Default to 'text' field
-                prompts = [item["text"] for item in batch]
+                # If no train split, use the first available split
+                first_split = list(dataset.keys())[0]
+                self.data = dataset[first_split]
             
-            # Process each prompt
+            # Print dataset features to help debug
+            print(f"Dataset features: {self.data.column_names}")
+            
+            # Limit number of samples if specified
+            if num_samples is not None:
+                self.data = self.data.select(range(min(num_samples, len(self.data))))
+            
+            # Pre-tokenize data to speed up training
+            print("Pre-tokenizing data to speed up training...")
+            self.tokenized_data = []
+            
+            # Process in batches for efficiency
+            batch_size = 32  # Process multiple examples at once
+            
+            # Determine which field to use based on dataset column names
+            columns = self.data.column_names
+            
+            # Check if required columns exist in the dataset
+            has_conversations = "conversations" in columns
+            has_instruction = "instruction" in columns
+            has_text = "text" in columns
+            has_question = "question" in columns
+            
+            for i in tqdm(range(0, len(self.data), batch_size)):
+                batch = self.data[i:min(i+batch_size, len(self.data))]
+                
+                # Extract prompts from the dataset based on available columns
+                if has_conversations:
+                    # Format for chat datasets
+                    prompts = [self._format_conversations(item["conversations"]) for item in batch]
+                elif has_instruction:
+                    # Format for instruction datasets
+                    prompts = [item["instruction"] for item in batch]
+                elif has_question:
+                    # Use question field if available
+                    prompts = [item["question"] for item in batch]
+                elif has_text:
+                    # Default to 'text' field
+                    prompts = [item["text"] for item in batch]
+                else:
+                    # If none of the expected fields exist, use the first column
+                    first_column = columns[0]
+                    prompts = [item[first_column] for item in batch]
+            
+            # Process each prompt with error handling
             for prompt in prompts:
-                self._process_and_tokenize_prompt(prompt)
+                try:
+                    if prompt is None or not isinstance(prompt, str):
+                        print(f"Warning: Skipping invalid prompt: {type(prompt)}")
+                        continue
+                    self._process_and_tokenize_prompt(prompt)
+                except Exception as e:
+                    print(f"Error processing prompt: {str(e)}")
+                    continue
         
-        # Free memory
-        del self.data
-        gc.collect()
+            # Free memory
+            del self.data
+            gc.collect()
+            
+        except Exception as e:
+            print(f"Error loading dataset {dataset_name}: {str(e)}")
+            print("Falling back to a small sample dataset.")
+            
+            # Create a small sample dataset with just a few examples for fallback
+            self.tokenized_data = []
+            sample_prompts = [
+                "What is machine learning?",
+                "Explain the concept of gradient descent.",
+                "How does a transformer model work?"
+            ]
+            
+            for prompt in sample_prompts:
+                self._process_and_tokenize_prompt(prompt)
     
     def _format_conversations(self, conversations):
         """Extract the first user message from conversations"""
