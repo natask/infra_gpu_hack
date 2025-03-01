@@ -9,7 +9,6 @@ import tqdm
 import pandas as pd
 import torch
 os.environ['HF_HOME'] = '/mount/model-cache'
-os.environ['HF_HUB_CACHE'] = '/mount/model-cache'
 
 def main():
     print(torch.backends.cuda.flash_sdp_enabled())
@@ -22,7 +21,7 @@ def main():
         enable_flash=True, enable_math=False, enable_mem_efficient=False
     ):
         parser = argparse.ArgumentParser(description="Generate model outputs")
-        parser.add_argument("--model_name", type=str, default="casperhansen/llama-3.3-70b-instruct-awq", help="Hugging Face model name or path")
+        parser.add_argument("--model_name", type=str, default="casperhansen/Llama-3.3-70B-instruct-awq", help="Hugging Face model name or path")
         parser.add_argument("--dataset_name", type=str, default='final_dataset.parquet', help="Name of the dataset file (without path) in parquet")
         parser.add_argument("--batch_size", type=int, default=8, help="Batch size for inference")
         parser.add_argument("--max_length", type=int, default=2080, help="Max generation length")
@@ -32,8 +31,9 @@ def main():
         results = []
         # Load model and tokenizer
         
+        
+        model = LlamaForCausalLM.from_pretrained(args.model_name).to('cuda')
         tokenizer = AutoTokenizer.from_pretrained(args.model_name)
-        model = LlamaForCausalLM.from_pretrained(args.model_name).to('cuda' if torch.cuda.is_available() else 'cpu')
         model.eval()
         print(f"cuda is avaliable: {torch.cuda.is_available()}")
 

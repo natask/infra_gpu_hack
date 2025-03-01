@@ -3,7 +3,6 @@ from huggingface_hub import login
 import time
 import os
 os.environ['HF_HOME'] = '/mount/model-cache'
-os.environ['HF_HUB_CACHE'] = '/mount/model-cache'
 
 model = LlamaForCausalLM.from_pretrained("casperhansen/Llama-3.3-70B-instruct-awq").to("cuda")
 tokenizer = AutoTokenizer.from_pretrained("casperhansen/Llama-3.3-70B-instruct-awq")

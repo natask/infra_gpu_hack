@@ -3,7 +3,6 @@ import numpy as np
 import torch.nn.functional as F
 
 os.environ['HF_HOME'] = '/mount/model-cache'
-os.environ['HF_HUB_CACHE'] = '/mount/model-cache'
 
 from transformers import AutoTokenizer, AutoModel
 
