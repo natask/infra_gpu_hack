@@ -68,7 +68,7 @@ You are a helpful assistant.
             solution = tokenizer.decode(outputs[0], skip_special_tokens=True)
             
             # Append to results
-            results.append({'user': question, 'asistant': solution})
+            results.append({'user': question, 'assistant': solution})
 
         # Create a DataFrame for results
         results_df = pd.DataFrame(results)
