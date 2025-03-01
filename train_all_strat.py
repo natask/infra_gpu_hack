@@ -12,7 +12,7 @@ import argparse
 class PromptDataset(Dataset):
     def __init__(self, data_path, tokenizer_teacher, tokenizer_student, max_length=512):
         # Load data more efficiently by specifying columns and using chunking
-        self.df = pd.read_parquet(data_path, columns=['question']).iloc[:1800]
+        self.df = pd.read_parquet(data_path, columns=['question']).iloc
         self.tokenizer_teacher = tokenizer_teacher
         self.tokenizer_student = tokenizer_student
         self.max_length = max_length
