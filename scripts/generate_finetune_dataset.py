@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 import os
 import argparse
-import json
+import csv
 from custom_dataset import get_dataloader
 from transformers import LlamaForCausalLM, AutoTokenizer
 import torch
@@ -48,12 +48,17 @@ def main():
 
         # Prepare the output files
         gpu_id = 0
-        messages_output_path = f'{args.name}__messages_output{gpu_id}.json'
-        time_output_path = f'{args.name}__time_output{gpu_id}.json'
+        messages_output_path = f'{args.name}__messages_output{gpu_id}.csv'
+        time_output_path = f'{args.name}__time_output{gpu_id}.csv'
 
-        # Ensure the files exist by opening them in write mode initially
-        open(messages_output_path, 'w').close()
-        open(time_output_path, 'w').close()
+        # Create files with headers
+        with open(messages_output_path, 'w', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow(['role', 'content'])
+        
+        with open(time_output_path, 'w', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow(['question', 'generation_time', 'tokens_per_second'])
 
         # Load dataset
         df = pd.read_parquet(os.path.join(base_dir, "../", args.dataset_name))
@@ -85,23 +90,24 @@ You are a helpful assistant.
             solution = tokenizer.batch_decode(outputs, skip_special_tokens=True, clean_up_tokenization_spaces=False)
 
             # Open the files in append mode using 'with' statement
-            with open(messages_output_path, 'a') as messages_file, open(time_output_path, 'a') as time_file:
-                # Append to messages format and save
-                message_entry = [
-                    {"role": "user", "content": question},
-                    {"role": "assistant", "content": solution}
-                ]
-                json.dump(message_entry, messages_file, indent=4)
-                messages_file.write("\n")
+            with open(messages_output_path, 'a', newline='') as messages_file, open(time_output_path, 'a', newline='') as time_file:
+                # Create CSV writers
+                messages_writer = csv.writer(messages_file)
+                time_writer = csv.writer(time_file)
+                
+                # Write user message
+                messages_writer.writerow(['user', question])
+                # Write assistant response
+                messages_writer.writerow(['assistant', solution[0]])
+                
+                print(f"Wrote user and assistant messages to CSV")
 
                 # Calculate tokens per second
                 num_tokens = inputs.input_ids.numel()
                 tokens_per_second = num_tokens / generation_time
 
                 # Record and save time elapsed
-                time_entry = {'question': question, 'generation_time': generation_time, 'tokens_per_second': tokens_per_second}
-                json.dump(time_entry, time_file, indent=4)
-                time_file.write("\n")
+                time_writer.writerow([question, generation_time, tokens_per_second])
                 
                 # Print the current index for easy resuming
                 print(f"Processed index {index}. To resume from next entry, use --start_index {index+1}")
