@@ -54,10 +54,6 @@ def main():
         open(messages_output_path, 'w').close()
         open(time_output_path, 'w').close()
 
-        # Open the files in append mode
-        messages_file = open(messages_output_path, 'a')
-        time_file = open(time_output_path, 'a')
-
         # Load dataset
         df = pd.read_parquet(os.path.join(base_dir, "../", args.dataset_name))
         total_start_time = time.time()
@@ -83,30 +79,25 @@ You are a helpful assistant.
             # Decode the generated solution
             solution = tokenizer.batch_decode(outputs, skip_special_tokens=True, clean_up_tokenization_spaces=False)
 
-            # Append to messages format and save
-            message_entry = [
-                {"role": "user", "content": question},
-                {"role": "assistant", "content": solution}
-            ]
-            print(message_entry)
-            json.dump(message_entry, messages_file, indent=4)
-            messages_file.write("\n")
+            # Open the files in append mode using 'with' statement
+            with open(messages_output_path, 'a') as messages_file, open(time_output_path, 'a') as time_file:
+                # Append to messages format and save
+                message_entry = [
+                    {"role": "user", "content": question},
+                    {"role": "assistant", "content": solution}
+                ]
+                print(message_entry)
+                json.dump(message_entry, messages_file, indent=4)
+                messages_file.write("\n")
 
-            # Calculate tokens per second
-            num_tokens = inputs.input_ids.numel()
-            tokens_per_second = num_tokens / generation_time
+                # Calculate tokens per second
+                num_tokens = inputs.input_ids.numel()
+                tokens_per_second = num_tokens / generation_time
 
-            # Record and save time elapsed
-            
-            time_entry = {'question': question, 'generation_time': generation_time, 'tokens_per_second': tokens_per_second}
-            json.dump(time_entry, time_file, indent=4)
-            print(time_entry)
-            time_file.write("\n")
-
-        # Close the files
-        messages_file.close()
-        time_file.close()
-
+                # Record and save time elapsed
+                time_entry = {'question': question, 'generation_time': generation_time, 'tokens_per_second': tokens_per_second}
+                json.dump(time_entry, time_file, indent=4)
+                time_file.write("\n")
 
         # Log the average generation time
         total_generation_time = time.time() - total_start_time
