@@ -1,6 +1,6 @@
 # DELTA - Diffusive Extrapolative Language Text Algorithm
 
-A novel algorithm that integrates a text, diffusion LLM as a draft model to boost the performance of traditional auto-regressive LLMs.
+A novel algorithm that integrates a text, diffusion LLM as a draft model to boost the performance of traditional auto-regressive LLMs. [Try it now]([url](https://deltafrontend.vercel.app/)).
 
 Built for the 2025 Mercor x Cognition x Etched Hackathon
 <img width="819" alt="image" src="https://github.com/user-attachments/assets/824ccf96-6974-42d6-b6cd-e8a1c36e0722" />
