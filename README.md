@@ -1,6 +1,8 @@
-# Infra GPU Hack Project
+# DELTA - Diffusive Extrapolative Language Text Algorithm
 
 This project is designed to handle and process datasets using various Python scripts. It combines datasets, evaluates models, and performs fine-tuning and speculative decoding.
+
+![Uploading image.png…]()
 
 ## Memory Optimization for LLaMA-LLaDA Distillation
 
