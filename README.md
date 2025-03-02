@@ -1,8 +1,9 @@
 # DELTA - Diffusive Extrapolative Language Text Algorithm
 
-This project is designed to handle and process datasets using various Python scripts. It combines datasets, evaluates models, and performs fine-tuning and speculative decoding.
+A novel algorithm that integrates a text, diffusion LLM as a draft model to boost the performance of traditional auto-regressive LLMs.
 
-![Uploading image.png…]()
+Built for the 2025 Mercor x Cognition x Etched Hackathon
+<img width="819" alt="image" src="https://github.com/user-attachments/assets/824ccf96-6974-42d6-b6cd-e8a1c36e0722" />
 
 ## Memory Optimization for LLaMA-LLaDA Distillation
 
